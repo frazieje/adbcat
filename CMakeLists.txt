@@ -15,9 +15,19 @@ endif()
 
 set(LIBEVENT_STATIC_LINK TRUE)
 
-add_executable(${PROJECT_NAME} main.c)
+add_executable(${PROJECT_NAME}
+        main.c
+        gateway.c
+        utils.c
+        hashtable.c
+        client.c)
 
 target_link_directories(${PROJECT_NAME} PUBLIC ${LIBEVENT_INCLUDE_DIRS}/../lib)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${LIBEVENT_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${PROJECT_NAME} PUBLIC ${LIBEVENT_LIBRARIES})
+if (LINUX)
+    set(ADDL_LIBS "bsd")
+else()
+    set(ADDL_LIBS "")
+endif()
+target_link_libraries(${PROJECT_NAME} PUBLIC ${LIBEVENT_LIBRARIES} ${ADDL_LIBS})

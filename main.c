@@ -7,6 +7,10 @@
 #include <event2/listener.h>
 #include <sys/resource.h>
 #include <netinet/in.h>
+#include <adbcat.h>
+#include <utils.h>
+#include <unistd.h>
+#include <gateway.h>
 
 #define LL_ADD(item, list) { \
     item->prev = NULL; \
@@ -22,26 +26,14 @@
     item->prev = item->next = NULL; \
 }
 
-#define SESSION_KEY_SIZE 16
-#define MAGIC_BYTES_SIZE 8
-#define SESSION_TYPE_SIZE 6
-#define SESSION_TYPE_SERVER "SERVER"
-#define SESSION_TYPE_CLIENT "CLIENT"
-
-#define MAX_INPUT_BUFFER_SIZE (512*1024)
-#define MAX_OUTPUT_BUFFER_SIZE (512*1024)
-
-unsigned char MAGIC_BYTES[] = { 15, 7, 20, 1, 3, 2, 4, 1};
-unsigned char EMPTY_SESSION[SESSION_KEY_SIZE];
-
-typedef struct client_connection {
+typedef struct client_connection_t {
     /* The actual connection, encapsulated in a bufferevent. */
     struct bufferevent *bev;
     evutil_socket_t fd;
     char host[NI_MAXHOST];
     char port[NI_MAXSERV];
-    struct client_connection *prev;
-    struct client_connection *next;
+    struct client_connection_t *prev;
+    struct client_connection_t *next;
     unsigned char session_key[SESSION_KEY_SIZE];
     int server;
     /* Optional openssl context */
@@ -49,14 +41,6 @@ typedef struct client_connection {
 } client_connection_t;
 
 client_connection_t *connections;
-
-void gen_session_key(unsigned char *target) {
-    size_t i;
-    for (i = 0; i < SESSION_KEY_SIZE; i++)
-    {
-        target[i] = arc4random();
-    }
-}
 
 client_connection_t * get_connection_by_bev(struct bufferevent *bev) {
     client_connection_t *curr = connections;
@@ -194,7 +178,7 @@ static void readcb(struct bufferevent *bev, void *ctx)
             LL_ADD(conn, connections)
         } else if (conn->server > 0) {
             printf("sending session key response to new server %s:%s\n", conn->host, conn->port);
-            gen_session_key(conn->session_key);
+            gen_session_key(conn->session_key, SESSION_KEY_SIZE);
             LL_ADD(conn, connections)
             unsigned char response[3 + SESSION_KEY_SIZE];
             memcpy(response, "OK ", 3);
@@ -215,6 +199,10 @@ static void readcb(struct bufferevent *bev, void *ctx)
         if (peer != NULL) {
             printf("peer %s:%s found for %s:%s, forwarding\n", peer->host, peer->port, conn->host, conn->port);
             struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
+            // TODO: prepend all client sends
+//            if (conn->server == 0) {
+//                evbuffer_add(peer_output, )
+//            }
             evbuffer_add_buffer(peer_output, input);
             if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
                 printf("peer %s:%s buffer full, disable %s:%s until drained\n", peer->host, peer->port, conn->host, conn->port);
@@ -328,14 +316,63 @@ int main(int argc, char **argv) {
     struct rlimit limit_openfiles;
     FILE *nr_open;
     int ret;
-    int port = 14242;
+    long r_port = 42821;
+    long port;
 
-    if (argc > 1) {
-        port = (int)strtol(argv[1], NULL, 10);
+    enum adbcat_type type;
+    char gateway_str[] = "gateway";
+    char client_str[] = "client";
+    char server_str[] = "server";
+    char usage_str[] = "Usage: %s [-h host] [-p local port] [-u remote port] [session key | 'gateway']\n";
+
+    char l_host[NI_MAXHOST];
+
+    int opt;
+
+    while ((opt = getopt(argc, argv, "hpu")) != -1) {
+        switch (opt) {
+            case 'h':
+                if (strlen(optarg) > NI_MAXHOST) {
+                    fprintf(stderr, "hostname too long\n");
+                    exit(EXIT_FAILURE);
+                }
+                strcpy(l_host, optarg);
+                break;
+            case 'p':
+                port = strtol(optarg, NULL, 10);
+                break;
+            case 'u':
+                r_port = strtol(optarg, NULL, 10);
+                break;
+            default: /* '?' */
+                fprintf(stderr, usage_str, argv[0]);
+                exit(EXIT_FAILURE);
+        }
+    }
+
+    if (argc == 2) {
+        if (strcmp("gateway", argv[optind]) == 0) {
+            type = gateway;
+            port = r_port;
+        } else if (strlen(argv[optind]) == SESSION_KEY_SIZE * 2) {
+            type = client;
+            port = 5038;
+        }
+    } else if (argc != 1) {
+        fprintf(stderr, usage_str, argv[0]);
+        exit(EXIT_FAILURE);
+    } else {
+        type = server;
+        port = r_port;
     }
 
     if (port <= 0 || port > 65535) {
         fprintf(stderr, "Invalid port\n");
+        return 1;
+    }
+
+    if (r_port <= 0 || r_port > 65535) {
+        fprintf(stderr, "Invalid remote port\n");
         return 1;
     }
 
@@ -345,13 +382,26 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("Maximum number of TCP clients: %llu\n", limit_openfiles.rlim_cur);
+    printf("Maximum number of TCP clients: %lu\n", limit_openfiles.rlim_cur);
 
     base = event_base_new();
     if (!base) {
         fprintf(stderr, "Couldn't open event base\n");
         return 1;
     }
+
+    switch(type) {
+        case gateway:
+            start_gateway(base);
+            break;
+        case client:
+            start_client(base, session_key_str);
+            break;
+        case server:
+            start_server(base);
+            break;
+    }
+
 
     /* Clear the sockaddr before using it, in case there are extra
      * platform-specific fields that can mess us up. */
@@ -362,18 +412,17 @@ int main(int argc, char **argv) {
     listener = evconnlistener_new_bind(base, accept_conn_cb, NULL,
                                        LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, 8192,
                                        (struct sockaddr*)&sin, sizeof(sin));
-
     if (!listener) {
         perror("Couldn't create listener");
         return 1;
     }
 
-    char l_host[NI_MAXHOST];
+    char l_host_s[NI_MAXHOST];
     char l_port[NI_MAXSERV];
-    getnameinfo((struct sockaddr*)&sin, sizeof(sin), l_host, NI_MAXHOST,
+    getnameinfo((struct sockaddr*)&sin, sizeof(sin), l_host_s, NI_MAXHOST,
                 l_port, NI_MAXSERV, NI_NUMERICHOST | NI_NUMERICSERV);
 
-    printf("Listening on %s port %s\n", l_host, l_port);
+    printf("Listening on %s port %s\n", l_host_s, l_port);
     evconnlistener_set_error_cb(listener, accept_error_cb);
 
     return event_base_dispatch(base);
