@@ -1,5 +1,5 @@
 #include <client.h>
 
-static void start() {
+int start_client(struct event_base *base, unsigned char *session_key) {
 
 }

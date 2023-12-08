@@ -16,11 +16,12 @@ endif()
 set(LIBEVENT_STATIC_LINK TRUE)
 
 add_executable(${PROJECT_NAME}
-        main.c
         gateway.c
         utils.c
         hashtable.c
-        client.c)
+        client.c
+        server.c
+        main.c)
 
 target_link_directories(${PROJECT_NAME} PUBLIC ${LIBEVENT_INCLUDE_DIRS}/../lib)
 

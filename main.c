@@ -11,6 +11,8 @@
 #include <utils.h>
 #include <unistd.h>
 #include <gateway.h>
+#include <client.h>
+#include <server.h>
 
 #define LL_ADD(item, list) { \
     item->prev = NULL; \
@@ -318,14 +320,12 @@ int main(int argc, char **argv) {
     int ret;
     long r_port = 42821;
     long port;
-
     enum adbcat_type type;
-    char gateway_str[] = "gateway";
-    char client_str[] = "client";
-    char server_str[] = "server";
     char usage_str[] = "Usage: %s [-h host] [-p local port] [-u remote port] [session key | 'gateway']\n";
 
     char l_host[NI_MAXHOST];
+
+    unsigned char session_key[SESSION_KEY_SIZE];
 
     int opt;
 
@@ -357,6 +357,11 @@ int main(int argc, char **argv) {
         } else if (strlen(argv[optind]) == SESSION_KEY_SIZE * 2) {
             type = client;
             port = 5038;
+            const char *pos = argv[optind];
+            for (int i = 0; i < SESSION_KEY_SIZE; i++) {
+                sscanf(pos, "%2hhx", &session_key[i]); // NOLINT(*-err34-c)
+                pos += 2;
+            }
         }
     } else if (argc != 1) {
         fprintf(stderr, usage_str, argv[0]);
@@ -382,7 +387,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("Maximum number of TCP clients: %lu\n", limit_openfiles.rlim_cur);
+    printf("Maximum number of TCP clients: %llu\n", limit_openfiles.rlim_cur);
 
     base = event_base_new();
     if (!base) {
@@ -392,14 +397,13 @@ int main(int argc, char **argv) {
 
     switch(type) {
         case gateway:
-            start_gateway(base);
-            break;
+            return start_gateway(base);
         case client:
-            start_client(base, session_key_str);
-            break;
+            return start_client(base, session_key);
         case server:
-            start_server(base);
-            break;
+            return start_server(base);
+        default:
+            return EXIT_FAILURE;
     }
 
 
@@ -407,23 +411,23 @@ int main(int argc, char **argv) {
      * platform-specific fields that can mess us up. */
     memset(&sin, 0, sizeof(sin));
     sin.sin6_family = AF_INET6;
-    /* Listen on the given port, on :: */
-    sin.sin6_port = htons(port);
-    listener = evconnlistener_new_bind(base, accept_conn_cb, NULL,
-                                       LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, 8192,
-                                       (struct sockaddr*)&sin, sizeof(sin));
-    if (!listener) {
-        perror("Couldn't create listener");
-        return 1;
-    }
-
-    char l_host_s[NI_MAXHOST];
-    char l_port[NI_MAXSERV];
-    getnameinfo((struct sockaddr*)&sin, sizeof(sin), l_host_s, NI_MAXHOST,
-                l_port, NI_MAXSERV, NI_NUMERICHOST | NI_NUMERICSERV);
-
-    printf("Listening on %s port %s\n", l_host_s, l_port);
-    evconnlistener_set_error_cb(listener, accept_error_cb);
-
-    return event_base_dispatch(base);
+//    /* Listen on the given port, on :: */
+//    sin.sin6_port = htons(port);
+//    listener = evconnlistener_new_bind(base, accept_conn_cb, NULL,
+//                                       LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, 8192,
+//                                       (struct sockaddr*)&sin, sizeof(sin));
+//    if (!listener) {
+//        perror("Couldn't create listener");
+//        return 1;
+//    }
+//
+//    char l_host_s[NI_MAXHOST];
+//    char l_port[NI_MAXSERV];
+//    getnameinfo((struct sockaddr*)&sin, sizeof(sin), l_host_s, NI_MAXHOST,
+//                l_port, NI_MAXSERV, NI_NUMERICHOST | NI_NUMERICSERV);
+//
+//    printf("Listening on %s port %s\n", l_host_s, l_port);
+//    evconnlistener_set_error_cb(listener, accept_error_cb);
+//
+//    return event_base_dispatch(base);
 }

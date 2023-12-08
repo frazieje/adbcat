@@ -3,5 +3,4 @@
 
 void gen_session_key(unsigned char *target, int length);
 
-
 #endif //ADBCAT_UTILS_H
