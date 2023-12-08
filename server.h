@@ -3,6 +3,6 @@
 
 #include <event2/listener.h>
 
-int start_server(struct event_base *base);
+int start_server(struct event_base *base, char *g_host, int g_port);
 
 #endif //ADBCAT_SERVER_H

@@ -14,19 +14,19 @@
 #include <client.h>
 #include <server.h>
 
-#define LL_ADD(item, list) { \
-    item->prev = NULL; \
-    item->next = list; \
-    list = item; \
-    if (list->next != NULL) list->next->prev = item; \
-}
-
-#define LL_REMOVE(item, list) { \
-    if (item->prev != NULL) item->prev->next = item->next; \
-    if (item->next != NULL) item->next->prev = item->prev; \
-    if (list == item) list = item->next; \
-    item->prev = item->next = NULL; \
-}
+//#define LL_ADD(item, list) { \
+//    item->prev = NULL; \
+//    item->next = list; \
+//    list = item; \
+//    if (list->next != NULL) list->next->prev = item; \
+//}
+//
+//#define LL_REMOVE(item, list) { \
+//    if (item->prev != NULL) item->prev->next = item->next; \
+//    if (item->next != NULL) item->next->prev = item->prev; \
+//    if (list == item) list = item->next; \
+//    item->prev = item->next = NULL; \
+//}
 
 typedef struct client_connection_t {
     /* The actual connection, encapsulated in a bufferevent. */
@@ -313,17 +313,12 @@ static void accept_error_cb(struct evconnlistener *listener, void *ctx)
 int main(int argc, char **argv) {
 
     struct event_base *base;
-    struct evconnlistener *listener;
-    struct sockaddr_in6 sin;
-    struct rlimit limit_openfiles;
-    FILE *nr_open;
-    int ret;
-    long r_port = 42821;
-    long port;
+    long g_port = DEFAULT_GATEWAY_PORT; // gateway port
+    long l_port = DEFAULT_LOCAL_LISTEN_PORT; // local listen port
     enum adbcat_type type;
-    char usage_str[] = "Usage: %s [-h host] [-p local port] [-u remote port] [session key | 'gateway']\n";
+    char usage_str[] = "Usage: %s [-h gateway host] [-u gateway port] [-p local port] [session key | 'gateway']\n";
 
-    char l_host[NI_MAXHOST];
+    char g_host[NI_MAXHOST] = DEFAULT_GATEWAY_HOST; // gateway host
 
     unsigned char session_key[SESSION_KEY_SIZE];
 
@@ -333,16 +328,16 @@ int main(int argc, char **argv) {
         switch (opt) {
             case 'h':
                 if (strlen(optarg) > NI_MAXHOST) {
-                    fprintf(stderr, "hostname too long\n");
+                    fprintf(stderr, "gateway hostname too long\n");
                     exit(EXIT_FAILURE);
                 }
-                strcpy(l_host, optarg);
+                strcpy(g_host, optarg);
                 break;
             case 'p':
-                port = strtol(optarg, NULL, 10);
+                l_port = strtol(optarg, NULL, 10);
                 break;
             case 'u':
-                r_port = strtol(optarg, NULL, 10);
+                g_port = strtol(optarg, NULL, 10);
                 break;
             default: /* '?' */
                 fprintf(stderr, usage_str, argv[0]);
@@ -352,42 +347,41 @@ int main(int argc, char **argv) {
 
     if (argc == 2) {
         if (strcmp("gateway", argv[optind]) == 0) {
+            if (l_port != DEFAULT_LOCAL_LISTEN_PORT) {
+                g_port = l_port;
+            } else {
+                l_port = g_port;
+            }
             type = gateway;
-            port = r_port;
         } else if (strlen(argv[optind]) == SESSION_KEY_SIZE * 2) {
             type = client;
-            port = 5038;
             const char *pos = argv[optind];
             for (int i = 0; i < SESSION_KEY_SIZE; i++) {
                 sscanf(pos, "%2hhx", &session_key[i]); // NOLINT(*-err34-c)
                 pos += 2;
             }
+        } else {
+            fprintf(stderr, "Malformed session key argument");
+            exit(EXIT_FAILURE);
         }
     } else if (argc != 1) {
         fprintf(stderr, usage_str, argv[0]);
         exit(EXIT_FAILURE);
     } else {
         type = server;
-        port = r_port;
     }
 
-    if (port <= 0 || port > 65535) {
-        fprintf(stderr, "Invalid port\n");
-        return 1;
+    if (type == client) {
+        if (l_port <= 0 || l_port > 65535) {
+            fprintf(stderr, "Invalid port\n");
+            return 1;
+        }
     }
 
-    if (r_port <= 0 || r_port > 65535) {
+    if (g_port <= 0 || g_port > 65535) {
         fprintf(stderr, "Invalid remote port\n");
         return 1;
     }
-
-    ret = getrlimit(RLIMIT_NOFILE, &limit_openfiles);
-    if (ret != 0) {
-        perror("Failed to get limit on number of open files");
-        return 1;
-    }
-
-    printf("Maximum number of TCP clients: %llu\n", limit_openfiles.rlim_cur);
 
     base = event_base_new();
     if (!base) {
@@ -397,11 +391,11 @@ int main(int argc, char **argv) {
 
     switch(type) {
         case gateway:
-            return start_gateway(base);
+            return start_gateway(base, (int)l_port);
         case client:
-            return start_client(base, session_key);
+            return start_client(base, (int)l_port, g_host, (int)g_port, session_key);
         case server:
-            return start_server(base);
+            return start_server(base, g_host, (int)g_port);
         default:
             return EXIT_FAILURE;
     }
@@ -409,8 +403,8 @@ int main(int argc, char **argv) {
 
     /* Clear the sockaddr before using it, in case there are extra
      * platform-specific fields that can mess us up. */
-    memset(&sin, 0, sizeof(sin));
-    sin.sin6_family = AF_INET6;
+//    memset(&sin, 0, sizeof(sin));
+//    sin.sin6_family = AF_INET6;
 //    /* Listen on the given port, on :: */
 //    sin.sin6_port = htons(port);
 //    listener = evconnlistener_new_bind(base, accept_conn_cb, NULL,
