@@ -14,8 +14,8 @@
 #define MAX_INPUT_BUFFER_SIZE (512*1024)
 #define MAX_OUTPUT_BUFFER_SIZE (512*1024)
 
-unsigned char MAGIC_BYTES[] = { 15, 7, 20, 1, 3, 2, 4, 1};
-unsigned char EMPTY_SESSION[SESSION_KEY_SIZE];
+static unsigned char MAGIC_BYTES[] = { 15, 7, 20, 1, 3, 2, 4, 1};
+static unsigned char EMPTY_SESSION[SESSION_KEY_SIZE];
 
 enum adbcat_type { gateway, client, server };
 

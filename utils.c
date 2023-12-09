@@ -4,6 +4,7 @@
 #ifdef _WIN32
 #define _CRT_RAND_S
 #endif
+#include <stdio.h>
 #include <stdlib.h>
 #include <utils.h>
 #include <adbcat.h>
@@ -14,7 +15,10 @@ void gen_session_key(unsigned char *target, int length) {
     int i;
     for (i = 0; i < length; i++)
     {
-#ifdef __unix__
+#ifdef __linux__
+        target[i] = arc4random();
+#endif
+#ifdef __APPLE__
         target[i] = arc4random();
 #endif
 #ifdef _WIN32

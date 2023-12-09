@@ -7,11 +7,11 @@
 
 enum gateway_connection_mode { gateway_client, gateway_server, unknown };
 
+#define ADDRESS_STRING_SIZE (NI_MAXHOST + NI_MAXSERV + 1)
+
 typedef struct gateway_connection_t {
     struct bufferevent *bev;
-    struct sockaddr *address;
-    int socklen;
-    int fd;
+    char addr_str[ADDRESS_STRING_SIZE];
     unsigned char session_key[SESSION_KEY_SIZE];
     enum gateway_connection_mode type;
     struct gateway_connection_t *prev;
@@ -19,10 +19,12 @@ typedef struct gateway_connection_t {
 //    SSL *ssl;
 } gateway_connection_t;
 
-#define ADDRESS_STRING_SIZE (NI_MAXHOST + NI_MAXSERV + 1)
+typedef struct gateway_connection_ref_t {
+    gateway_connection_t *value;
+} gateway_connection_ref_t;
 
-HashTable gateway_clients = HT_INITIALIZER
-HashTable gateway_servers = HT_INITIALIZER
+static HashTable gateway_clients = HT_INITIALIZER
+static HashTable gateway_servers = HT_INITIALIZER
 
 int start_gateway(struct event_base *base, int l_port);
 
