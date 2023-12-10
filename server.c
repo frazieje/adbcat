@@ -4,36 +4,66 @@
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 #include "adbcat.h"
+#include "utils.h"
+
+static void closeGateway(struct bufferevent *bev) {
+    printf("closing gateway connection\n");
+    struct event_base *base = bufferevent_get_base(bev);
+    bufferevent_free(bev);
+    evutil_closesocket(bufferevent_getfd(bev));
+    event_base_loopexit(base, NULL);
+}
 
 static void gateway_readcb(struct bufferevent *bev, void *ctx) {
-    struct evbuffer *src, *dst;
+    struct evbuffer *src;
     size_t len;
     src = bufferevent_get_input(bev);
     len = evbuffer_get_length(src);
 
-    if (ctx == NULL) {
-        printf("session not yet set")
+    unsigned char *session_key = (unsigned char *)ctx;
 
-    }
-
-    if (!peer) {
-        if (len <= MAX_INPUT_BUFFER_SIZE) {
-            printf(", aborting for now \n");
+    if (memcmp(session_key, EMPTY_SESSION, SESSION_KEY_SIZE) == 0) {
+        int min_length = SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE;
+        char data[min_length];
+        if (len < min_length) {
+            printf("short read from gateway, aborting for now\n");
             return;
         }
-        evbuffer_drain(src, len);
+        evbuffer_remove(src, data, min_length);
+        if (memcmp(data, SESSION_OK_RESPONSE, SESSION_OK_RESPONSE_SIZE) != 0) {
+            printf("gateway handshake failed 0x143\n");
+            closeGateway(bev);
+            return;
+        }
+        memcpy(session_key, &data[SESSION_OK_RESPONSE_SIZE], SESSION_KEY_SIZE);
+        char session_key_str[SESSION_KEY_SIZE * 2 + 1];
+        get_session_key_str(session_key, session_key_str);
+        printf("local adb server shared via adbcat at %s", session_key_str);
     }
 
-    dst = bufferevent_get_output(peer);
-    evbuffer_add_buffer(dst, src);
+    len = evbuffer_get_length(src);
+    printf("read %lu from gateway...\n", len);
+    if (len > 0) {
 
-    if (evbuffer_get_length(dst) >= MAX_OUTPUT_BUFFER_SIZE) {
-        bufferevent_setcb(peer, readcb, drained_writecb,
-                          eventcb, bev);
-        bufferevent_setwatermark(peer, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE/2,
-                                 MAX_OUTPUT_BUFFER_SIZE);
-        bufferevent_disable(bev, EV_READ);
     }
+//    if (!peer) {
+//        if (len <= MAX_INPUT_BUFFER_SIZE) {
+//            printf(", aborting for now \n");
+//            return;
+//        }
+//        evbuffer_drain(src, len);
+//    }
+//
+//    dst = bufferevent_get_output(peer);
+//    evbuffer_add_buffer(dst, src);
+//
+//    if (evbuffer_get_length(dst) >= MAX_OUTPUT_BUFFER_SIZE) {
+//        bufferevent_setcb(peer, readcb, drained_writecb,
+//                          eventcb, bev);
+//        bufferevent_setwatermark(peer, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE/2,
+//                                 MAX_OUTPUT_BUFFER_SIZE);
+//        bufferevent_disable(bev, EV_READ);
+//    }
 }
 
 int start_server(
@@ -47,11 +77,16 @@ int start_server(
     int sock;
     int ret;
 
+    ht_setup(&active_connections,
+             sizeof(unsigned char[SESSION_KEY_SIZE]),
+             sizeof(gateway_connection_ref_t), 0);
+
     memset(&adb_server, 0, sizeof(adb_server));
     adb_server.sin6_addr = in6addr_loopback;
     adb_server.sin6_family = AF_INET6;
     adb_server.sin6_port = htons(adb_server_port);
 
+    // First try to connect to the local adb server before we connect to the gateway.
     sock = socket(adb_server.sin6_family, SOCK_STREAM, IPPROTO_TCP);
 
     if (sock == -1) {
@@ -101,7 +136,10 @@ int start_server(
 
     evbuffer_prepend(gateway_out, preamble, server_preamble_size);
 
-    bufferevent_setcb(gateway_bev, gateway_readcb, NULL, gateway_eventcb, NULL);
+    unsigned char session_key[SESSION_KEY_SIZE];
+    memcpy(session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
+
+    bufferevent_setcb(gateway_bev, gateway_readcb, NULL, gateway_eventcb, session_key);
     bufferevent_enable(gateway_bev, EV_READ|EV_WRITE);
 
     return event_base_dispatch(base);

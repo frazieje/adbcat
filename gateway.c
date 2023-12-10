@@ -200,7 +200,8 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     struct evbuffer *input = bufferevent_get_input(bev);
     struct evbuffer *output = bufferevent_get_output(bev);
 
-    char data[4096];
+    int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
+    char data[min_length];
     int nbytes;
     size_t input_length;
     printf("1\n");
@@ -209,7 +210,6 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         if (conn->type == unknown) {
             printf("%s has no session type\n", conn->addr_str);
             //session is not yet set, try to read start line
-            int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
             input_length = evbuffer_get_length(input);
             if (input_length < min_length) {
                 printf("short read from new client %s, aborting for now\n", conn->addr_str);
@@ -245,10 +245,10 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         } else if (conn->type == gateway_server) {
             printf("sending session key response to new server %s\n", conn->addr_str);
             gen_session_key(conn->session_key, SESSION_KEY_SIZE);
-            unsigned char response[3 + SESSION_KEY_SIZE];
-            memcpy(response, "OK ", 3);
-            memcpy(&response[3], conn->session_key, SESSION_KEY_SIZE);
-            evbuffer_add(output, response, 3 + SESSION_KEY_SIZE);
+            unsigned char response[SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE];
+            memcpy(response, SESSION_OK_RESPONSE, SESSION_OK_RESPONSE_SIZE);
+            memcpy(&response[SESSION_OK_RESPONSE_SIZE], conn->session_key, SESSION_KEY_SIZE);
+            evbuffer_add(output, response, SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE);
         } else {
             memcpy(conn->session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
             return;

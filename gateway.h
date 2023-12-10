@@ -25,6 +25,14 @@ typedef struct gateway_connection_ref_t {
 static HashTable gateway_clients = HT_INITIALIZER
 static HashTable gateway_servers = HT_INITIALIZER
 
+/**
+ * Start the gateway. The gateway accepts connections from adbcat servers and clients, and relays data between
+ * connections with matching session keys.
+ *
+ * @param base the libevent event_base to listen on
+ * @param local_port the local port to listen on
+ * @return exit code
+ */
 int start_gateway(struct event_base *base, int local_port);
 
 #endif //ADBCAT_GATEWAY_H
