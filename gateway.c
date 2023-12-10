@@ -113,6 +113,7 @@ static void closeClient(gateway_connection_t *conn) {
     } else if (conn->type == gateway_server) {
         remove_server(conn);
     }
+    bufferevent_free(conn->bev);
     evutil_closesocket(bufferevent_getfd(conn->bev));
     free(conn);
 }
@@ -327,8 +328,9 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
             printf("%s disconnected\n", conn->addr_str);
             closeClient(conn);
             printConnections();
+        } else {
+            bufferevent_free(bev);
         }
-        bufferevent_free(bev);
     }
 }
 

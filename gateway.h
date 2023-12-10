@@ -4,10 +4,9 @@
 #include <event2/listener.h>
 #include "adbcat.h"
 #include "hashtable.h"
+#include "utils.h"
 
 enum gateway_connection_mode { gateway_client, gateway_server, unknown };
-
-#define ADDRESS_STRING_SIZE (NI_MAXHOST + NI_MAXSERV + 1)
 
 typedef struct gateway_connection_t {
     struct bufferevent *bev;

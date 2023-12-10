@@ -319,8 +319,8 @@ int main(int argc, char **argv) {
     unsigned char session_key[SESSION_KEY_SIZE];
 
     int opt;
-
-    while ((opt = getopt(argc, argv, "hpu")) != -1) {
+    opterr = 0;
+    while ((opt = getopt(argc, argv, "h:p:u:")) != -1) {
         switch (opt) {
             case 'h':
                 if (strlen(optarg) > NI_MAXHOST) {
@@ -336,12 +336,13 @@ int main(int argc, char **argv) {
                 g_port = strtol(optarg, NULL, 10);
                 break;
             default: /* '?' */
-                fprintf(stderr, usage_str, argv[0]);
-                exit(EXIT_FAILURE);
+                break;
         }
     }
 
-    if (argc == 2) {
+    int remaining = argc - optind;
+
+    if (remaining == 1) {
         if (strcmp("gateway", argv[optind]) == 0) {
             if (l_port != DEFAULT_LOCAL_LISTEN_PORT) {
                 g_port = l_port;
@@ -360,7 +361,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Malformed session key argument");
             exit(EXIT_FAILURE);
         }
-    } else if (argc != 1) {
+    } else if (remaining != 0) {
         fprintf(stderr, usage_str, argv[0]);
         exit(EXIT_FAILURE);
     } else {

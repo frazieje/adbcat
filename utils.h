@@ -5,6 +5,8 @@
 
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
+#define ADDRESS_STRING_SIZE (NI_MAXHOST + NI_MAXSERV + 1)
+
 void gen_session_key(unsigned char *target, int length);
 
 void get_session_key_str(unsigned char *session_key, char *target);
