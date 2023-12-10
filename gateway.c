@@ -381,7 +381,7 @@ static void accept_error_cb(struct evconnlistener *listener, void *ctx)
     event_base_loopexit(base, NULL);
 }
 
-int start_gateway(struct event_base *base, int l_port) {
+int start_gateway(struct event_base *base, int local_port) {
 
     struct evconnlistener *listener;
     struct sockaddr_in6 sin;
@@ -397,7 +397,7 @@ int start_gateway(struct event_base *base, int l_port) {
     memset(&sin, 0, sizeof(sin));
     sin.sin6_family = AF_INET6;
     /* Listen on the given port, on :: */
-    sin.sin6_port = htons(l_port);
+    sin.sin6_port = htons(local_port);
     listener = evconnlistener_new_bind(base, accept_conn_cb, NULL,
                                        LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, 8192,
                                        (struct sockaddr *) &sin, sizeof(sin));

@@ -99,10 +99,10 @@ static void accept_conn_cb(
     gateway_bev = bufferevent_socket_new(base, -1,
                                    BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
 
-    gateway_addr_t *gateway_addr = (gateway_addr_t *)p;
+    gateway_connect_t *gateway_connect = (gateway_connect_t *)p;
 
     if (bufferevent_socket_connect(gateway_bev,
-                                   (struct sockaddr *)gateway_addr->gateway_addr, gateway_addr->gateway_addr_len)<0) {
+                                   (struct sockaddr *)gateway_connect->gateway_addr, gateway_connect->gateway_addr_len)<0) {
         perror("bufferevent_socket_connect");
         bufferevent_free(gateway_bev);
         bufferevent_free(client_bev);
@@ -118,7 +118,7 @@ static void accept_conn_cb(
     char preamble[client_preamble_size];
     memcpy(preamble, MAGIC_BYTES, MAGIC_BYTES_SIZE);
     memcpy(&preamble[MAGIC_BYTES_SIZE], SESSION_TYPE_CLIENT, SESSION_TYPE_SIZE);
-    memcpy(&preamble[MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE], gateway_addr->session_key, SESSION_KEY_SIZE);
+    memcpy(&preamble[MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE], gateway_connect->session_key, SESSION_KEY_SIZE);
 
     evbuffer_prepend(gateway_out, preamble, client_preamble_size);
 
@@ -136,30 +136,26 @@ static void accept_error_cb(struct evconnlistener *listener, void *ctx)
     event_base_loopexit(base, NULL);
 }
 
-int start_client(struct event_base *base, int l_port, char *g_host, int g_port, unsigned char *session_key) {
+int start_client(
+        struct event_base *base,
+        int local_port,
+        struct sockaddr *gateway_addr,
+        socklen_t gateway_addr_len,
+        unsigned char *session_key
+) {
 
     struct evconnlistener *listener;
     struct sockaddr_in6 sin;
 
-    struct sockaddr_in6 gateway_addr;
-    int gateway_addr_len;
-
-    memset(&gateway_addr, 0, sizeof(gateway_addr));
-    gateway_addr_len = sizeof(gateway_addr);
-    if (evutil_parse_sockaddr_port(g_host, (struct sockaddr*)&gateway_addr, &gateway_addr_len)<0) {
-        perror("Could not parse gateway hostname");
-    }
-    gateway_addr.sin6_port = htons(g_port);
-
     memset(&sin, 0, sizeof(sin));
     sin.sin6_family = AF_INET6;
     /* Listen on the given port, on :: */
-    sin.sin6_port = htons(l_port);
+    sin.sin6_port = htons(local_port);
 
-    gateway_addr_t _gateway_addr = { .gateway_addr = &gateway_addr, .gateway_addr_len = gateway_addr_len };
-    memcpy(_gateway_addr.session_key, session_key, SESSION_KEY_SIZE);
+    gateway_connect_t gateway_connect = { .gateway_addr = gateway_addr, .gateway_addr_len = gateway_addr_len };
+    memcpy(gateway_connect.session_key, session_key, SESSION_KEY_SIZE);
 
-    listener = evconnlistener_new_bind(base, accept_conn_cb, &_gateway_addr,
+    listener = evconnlistener_new_bind(base, accept_conn_cb, &gateway_connect,
                                        LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, 8192,
                                        (struct sockaddr *) &sin, sizeof(sin));
     if (!listener) {
