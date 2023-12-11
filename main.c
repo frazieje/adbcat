@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
                 break;
             case 'p':
                 if (strlen(optarg) > NI_MAXSERV) {
-                    fprintf(stderr, "gateway port too long\n");
+                    fprintf(stderr, "local port too long\n");
                     exit(EXIT_FAILURE);
                 }
                 strcpy(l_port, optarg);
