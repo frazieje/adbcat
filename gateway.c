@@ -277,10 +277,15 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         if (peer != NULL) {
             printf("peer %s found for %s, forwarding\n", peer->addr_str, conn->addr_str);
             struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
-            // TODO: prepend all client sends
-//            if (conn->server == 0) {
-//                evbuffer_add(peer_output, )
-//            }
+            if (peer->type == server) {
+                int bevfd = bufferevent_getfd(peer->bev);
+                int server_fwd_preamble_size = SERVER_MSG_SIZE + SERVER_FWD_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
+                char preamble[server_fwd_preamble_size];
+                memcpy(preamble, SERVER_FWD_MSG, SERVER_MSG_SIZE);
+                memcpy(&preamble[SERVER_MSG_SIZE], &bevfd, SERVER_FWD_FROM_SIZE);
+                memcpy(&preamble[SERVER_MSG_SIZE + SERVER_FWD_FROM_SIZE], &input_length, SERVER_FWD_LENGTH_SIZE);
+                evbuffer_add(peer_output, preamble, server_fwd_preamble_size);
+            }
             evbuffer_add_buffer(peer_output, input);
             if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
                 printf("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);

@@ -14,15 +14,20 @@ static void closeGateway(struct bufferevent *bev) {
     event_base_loopexit(base, NULL);
 }
 
+static gateway_message_t *process_messages(gateway_message_t *prev_ctx, struct evbuffer *buffer) {
+    if (prev_ctx != NULL) {
+        int len = evbuffer_get_length(buffer);
+        ctx
+    }
+}
+
 static void gateway_readcb(struct bufferevent *bev, void *ctx) {
-    struct evbuffer *src;
+    struct evbuffer *src, *dst;
     size_t len;
     src = bufferevent_get_input(bev);
     len = evbuffer_get_length(src);
 
-    unsigned char *session_key = (unsigned char *)ctx;
-
-    if (memcmp(session_key, EMPTY_SESSION, SESSION_KEY_SIZE) == 0) {
+    if (memcmp(server_session_key, EMPTY_SESSION, SESSION_KEY_SIZE) == 0) {
         int min_length = SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE;
         char data[min_length];
         if (len < min_length) {
@@ -35,16 +40,34 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
             closeGateway(bev);
             return;
         }
-        memcpy(session_key, &data[SESSION_OK_RESPONSE_SIZE], SESSION_KEY_SIZE);
+        memcpy(server_session_key, &data[SESSION_OK_RESPONSE_SIZE], SESSION_KEY_SIZE);
         char session_key_str[SESSION_KEY_SIZE * 2 + 1];
-        get_session_key_str(session_key, session_key_str);
+        get_session_key_str(server_session_key, session_key_str);
         printf("local adb server shared via adbcat at %s", session_key_str);
     }
 
     len = evbuffer_get_length(src);
     printf("read %lu from gateway...\n", len);
     if (len > 0) {
+        if (ctx != NULL) {
+            //we're already working on a message
+             gateway_message_t *message = (gateway_message_t *)ctx;
+             size_t remaining = len;
+             while (remaining > 0) {
+                 adb_server_connection_t *cxn = ht_lookup(&active_connections, &message->from);
+                 if (cxn != NULL) {
+                     dst = bufferevent_get_output(cxn->bev);
+                     char data[remaining];
+                     int nbytes = evbuffer_remove(src, data, remaining);
+                     evbuffer_add(dst, data, nbytes);
+                     message->sent += nbytes;
 
+                 } else {
+                     //connect
+                 }
+                 remaining = evbuffer_get_length(src);
+             }
+        }
     }
 //    if (!peer) {
 //        if (len <= MAX_INPUT_BUFFER_SIZE) {
@@ -66,6 +89,31 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
 //    }
 }
 
+static void gateway_eventcb(struct bufferevent *bev, short what, void *ctx) {
+    if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
+        if (what & BEV_EVENT_ERROR) {
+            if (errno)
+                perror("connection error");
+        }
+
+//        if (peer) {
+//            /* Flush all pending data */
+//            readcb(bev, ctx);
+//            if (evbuffer_get_length(
+//                    bufferevent_get_output(peer))) {
+//                bufferevent_setcb(peer,
+//                                  NULL, close_on_finished_writecb,
+//                                  eventcb, NULL);
+//                bufferevent_disable(peer, EV_READ);
+//            } else {
+//                bufferevent_free(peer);
+//            }
+//        }
+        closeGateway(bev);
+//        bufferevent_free(bev);
+    }
+}
+
 int start_server(
         struct event_base *base,
         int adb_server_port,
@@ -78,8 +126,8 @@ int start_server(
     int ret;
 
     ht_setup(&active_connections,
-             sizeof(unsigned char[SESSION_KEY_SIZE]),
-             sizeof(gateway_connection_ref_t), 0);
+             SERVER_FWD_FROM_SIZE,
+             sizeof(adb_server_connection_t), 0);
 
     memset(&adb_server, 0, sizeof(adb_server));
     adb_server.sin6_addr = in6addr_loopback;
@@ -136,10 +184,9 @@ int start_server(
 
     evbuffer_prepend(gateway_out, preamble, server_preamble_size);
 
-    unsigned char session_key[SESSION_KEY_SIZE];
-    memcpy(session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
+    memcpy(server_session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
 
-    bufferevent_setcb(gateway_bev, gateway_readcb, NULL, gateway_eventcb, session_key);
+    bufferevent_setcb(gateway_bev, gateway_readcb, NULL, gateway_eventcb, NULL);
     bufferevent_enable(gateway_bev, EV_READ|EV_WRITE);
 
     return event_base_dispatch(base);

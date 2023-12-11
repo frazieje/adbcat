@@ -35,8 +35,7 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     }
 }
 
-static void drained_writecb(struct bufferevent *bev, void *ctx)
-{
+static void drained_writecb(struct bufferevent *bev, void *ctx) {
     struct bufferevent *peer = ctx;
     bufferevent_setcb(bev, readcb, NULL, eventcb, peer);
     bufferevent_setwatermark(bev, EV_WRITE, 0, 0);
@@ -44,9 +43,7 @@ static void drained_writecb(struct bufferevent *bev, void *ctx)
         bufferevent_enable(peer, EV_READ);
 }
 
-static void
-close_on_finished_writecb(struct bufferevent *bev, void *ctx)
-{
+static void close_on_finished_writecb(struct bufferevent *bev, void *ctx) {
     struct evbuffer *b = bufferevent_get_output(bev);
 
     if (evbuffer_get_length(b) == 0) {
@@ -54,9 +51,7 @@ close_on_finished_writecb(struct bufferevent *bev, void *ctx)
     }
 }
 
-static void
-eventcb(struct bufferevent *bev, short what, void *ctx)
-{
+static void eventcb(struct bufferevent *bev, short what, void *ctx) {
     struct bufferevent *peer = ctx;
 
     if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
