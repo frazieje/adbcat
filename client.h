@@ -7,7 +7,7 @@
 typedef struct gateway_connect_t {
     struct sockaddr *gateway_addr;
     socklen_t gateway_addr_len;
-    char session_key[SESSION_KEY_SIZE];
+    unsigned char session_key[SESSION_KEY_SIZE];
 } gateway_connect_t;
 
 int start_client(
