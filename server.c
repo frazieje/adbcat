@@ -15,14 +15,10 @@ static void adb_readcb(struct bufferevent *bev, void *ctx);
 
 static void adb_eventcb(struct bufferevent *bev, short what, void *ctx);
 
-static void closeClient(uint32_t from, adb_server_connection_t *cxn) {
-    printf("close client 1");
-    ht_erase(&active_connections, &from);
-    printf("close client 2");
+static void closeClient(adb_server_connection_t *cxn) {
     bufferevent_free(cxn->adb_bev);
-    printf("close client 3");
     evutil_closesocket(bufferevent_getfd(cxn->adb_bev));
-    printf("close client 4");
+    ht_erase(&active_connections, &cxn->from);
 }
 
 static void closeGateway(struct bufferevent *bev) {
@@ -40,7 +36,7 @@ static void closeGateway(struct bufferevent *bev) {
             next = node->next;
             adb_server_connection_t *curr_conn = (adb_server_connection_t *)node->value;
             count++;
-            closeClient(*(uint32_t *)node->key, curr_conn);
+            closeClient(curr_conn);
             node = next;
         }
     }
@@ -75,23 +71,35 @@ static void gateway_drained_writecb(struct bufferevent *bev, void *ctx) {
 }
 
 static void adb_eventcb(struct bufferevent *bev, short what, void *ctx) {
-    printf("adb_evetcb\n");
+    printf("adb_eventcb\n");
+    if (ctx == NULL) {
+        printf("adb_eventcb cxn is null\n");
+    } else {
+        printf("adb_eventcb cxn is not null\n");
+    }
     if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
         if (what & BEV_EVENT_ERROR) {
             if (errno)
                 perror("connection error");
         }
         printf("adb_eventcb eof or error\n");
+
         adb_server_connection_t *cxn = (adb_server_connection_t *)ctx;
-        closeClient(cxn->from, cxn);
-        printf("client %d connection closed, sending close to gw", cxn->from);
-        int server_close_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE;
+
+        unsigned char length[SERVER_FWD_LENGTH_SIZE] = {0};
+        int server_close_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
         unsigned char server_close[server_close_size];
         memcpy(server_close, SERVER_CLOSE_MSG, SERVER_MSG_TYPE_SIZE);
         memcpy(&server_close[SERVER_MSG_TYPE_SIZE], &cxn->from, SERVER_MSG_FROM_SIZE);
+        memcpy(&server_close[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], length,
+               SERVER_FWD_LENGTH_SIZE);
         struct evbuffer *dst = bufferevent_get_output(cxn->gw_bev);
-        int nbytes = evbuffer_add(dst, server_close, server_close_size);
-        printf("wrote %d bytes to close client %d", nbytes, cxn->from);
+        int success = evbuffer_add(dst, server_close, server_close_size);
+        if (success == 0) {
+            printf("wrote %d bytes to close client %d\n", server_close_size, cxn->from);
+        }
+        closeClient(cxn);
+
     }
 }
 
@@ -113,9 +121,13 @@ static void adb_readcb(struct bufferevent *bev, void *ctx) {
         memcpy(preamble, SERVER_FWD_MSG, SERVER_MSG_TYPE_SIZE);
         memcpy(&preamble[SERVER_MSG_TYPE_SIZE], &cxn->from, SERVER_MSG_FROM_SIZE);
         memcpy(&preamble[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], &len, SERVER_FWD_LENGTH_SIZE);
-        int nbytes = evbuffer_add(dst, preamble, server_fwd_preamble_size);
-        printf("wrote %d preamble bytes", nbytes);
-        evbuffer_add_buffer(dst, src);
+        int success = evbuffer_add(dst, preamble, server_fwd_preamble_size);
+        if (success == 0) {
+            success = evbuffer_add_buffer(dst, src);
+            if (success == 0) {
+                printf("wrote %lu total bites with %d preamble and %lu payload bytes\n", server_fwd_preamble_size + len, server_fwd_preamble_size, len);
+            }
+        }
         if (evbuffer_get_length(dst) >= MAX_OUTPUT_BUFFER_SIZE) {
             void *curr_gw_ctx;
             bufferevent_getcb(cxn->gw_bev, NULL, NULL, NULL, &curr_gw_ctx);
@@ -178,7 +190,7 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
                 printf("process close message for client %d\n", from);
                 if (cxn != NULL) {
                     printf("client %d has active connection with adb server, closing\n", from);
-                    closeClient(from, cxn);
+                    closeClient(cxn);
                 } else {
                     printf("no active connection found for client %d\n", from);
                 }
@@ -215,9 +227,9 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
                 return;
             }
             adb_server_connection_t newCxn = { .adb_bev = adb_server_bev, .gw_bev = bev, .from = message->from };
-            ht_insert(&active_connections, &message->from, &newCxn);
+            int insret = ht_insert(&active_connections, &message->from, &newCxn);
             adb_server_connection_t *newCxnP = ht_lookup(&active_connections, &message->from);
-            printf("newCxnP has from %d\n", newCxnP->from);
+            printf("newCxnP has from %d, insret = %d\n", newCxnP->from, insret);
             cxn = newCxnP;
             bufferevent_setcb(adb_server_bev, adb_readcb, NULL, adb_eventcb, newCxnP);
             bufferevent_enable(adb_server_bev, EV_READ|EV_WRITE);
@@ -328,6 +340,7 @@ int start_server(
     }
 
     struct evbuffer *gateway_out = bufferevent_get_output(gateway_bev);
+    printf("gateway_bev is %p\n", gateway_bev);
 
     size_t server_preamble_size = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
     char preamble[server_preamble_size];

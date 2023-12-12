@@ -59,7 +59,7 @@ static void eventcb(struct bufferevent *bev, short what, void *ctx) {
             if (errno)
                 perror("connection error");
         }
-
+        printf("conn disconnected\n");
         if (peer) {
             /* Flush all pending data */
             readcb(bev, ctx);
@@ -85,6 +85,7 @@ static void accept_conn_cb(
         int slen,
         void *p
 ) {
+    printf("client conn accepted\n");
     struct bufferevent *gateway_bev, *client_bev;
     struct event_base *base = evconnlistener_get_base(listener);
 

@@ -303,7 +303,6 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     if (conn->type == gateway_client) {
         add_client(conn);
     } else if (conn->type == gateway_server) {
-        printf("inserting new server %s\n", conn->addr_str);
         add_server(conn);
     } else {
         return;
@@ -334,6 +333,7 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                     printf("message from server %s is a close message\n", conn->addr_str);
                     uint32_t from;
                     evbuffer_remove(input, &from, SERVER_MSG_FROM_SIZE);
+                    evbuffer_drain(input, SERVER_FWD_LENGTH_SIZE);
                     peer = get_client_connection(conn->session_key, from);
                     printf("process close message from server %s for client %d\n", conn->addr_str, from);
                     if (peer != NULL) {
@@ -360,15 +360,16 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                 continue;
             }
             uint64_t remaining = message->length - conn->current_message_sent;
-            printf("message from client %d with %lu remaining...\n", message->from, remaining);
+            printf("message from server %s to client %d with %lu remaining...\n", conn->addr_str, message->from, remaining);
             peer = get_client_connection(conn->session_key, conn->current_message->from);
             if (peer != NULL) {
+                printf("client peer %s found for %s, forwarding\n", peer->addr_str, conn->addr_str);
                 struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
                 char remaining_data[remaining];
                 int msg_nbytes = evbuffer_remove(input, remaining_data, remaining);
                 evbuffer_add(peer_output, remaining_data, msg_nbytes);
                 conn->current_message_sent += msg_nbytes;
-                printf("wrote %d bytes to server %d\n", msg_nbytes, message->from);
+                printf("wrote %d bytes to client %d\n", msg_nbytes, message->from);
                 if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
                     printf("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
                     bufferevent_setcb(peer->bev, readcb, drained_writecb,
@@ -409,7 +410,7 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                 evbuffer_add(peer_output, preamble, server_fwd_preamble_size);
                 evbuffer_add_buffer(peer_output, input);
                 size_t total_bytes_sent = server_fwd_preamble_size + input_length;
-                printf("forwarded %lu bytes from client %s to server peer %s with from %d, forwarding with preamble\n", total_bytes_sent, peer->addr_str, conn->addr_str, bevfd);
+                printf("forwarded %lu bytes from client %s to server peer %s with from %d and length %lu, forwarding with preamble\n", total_bytes_sent, conn->addr_str, peer->addr_str, bevfd, input_length);
                 if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
                     printf("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
                     bufferevent_setcb(peer->bev, readcb, drained_writecb,
@@ -443,13 +444,31 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
         if (ctx != NULL) {
             printf("error callback for %s\n", conn->addr_str);
             if (conn->type == gateway_server) {
-                printf("server ");
+                printf("server %s disconnected", conn->addr_str);
             } else if (conn->type == gateway_client) {
-                printf("client ");
+                printf("client %s disconnected\n", conn->addr_str);
+                gateway_connection_t *server_peer = get_server_connection(conn->session_key);
+                if (server_peer != NULL) {
+                    printf("found server %s for client %s, sending close message to server\n", server_peer->addr_str, conn->addr_str);
+                    uint32_t bevfd = bufferevent_getfd(conn->bev);
+                    unsigned char length[SERVER_FWD_LENGTH_SIZE] = {0};
+                    int server_close_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
+                    unsigned char server_close[server_close_size];
+                    memcpy(server_close, SERVER_CLOSE_MSG, SERVER_MSG_TYPE_SIZE);
+                    memcpy(&server_close[SERVER_MSG_TYPE_SIZE], &bevfd, SERVER_MSG_FROM_SIZE);
+                    memcpy(&server_close[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], length,
+                           SERVER_FWD_LENGTH_SIZE);
+                    struct evbuffer *dst = bufferevent_get_output(server_peer->bev);
+                    int success = evbuffer_add(dst, server_close, server_close_size);
+                    if (success == 0) {
+                        printf("wrote %d bytes to server %s close client %s\n", server_close_size, server_peer->addr_str, conn->addr_str);
+                    }
+                } else {
+                    printf("client %s disconnected, no server found. not sending close msg\n", conn->addr_str);
+                }
             } else {
                 printf("");
             }
-            printf("%s disconnected\n", conn->addr_str);
             closeClient(conn);
             printConnections();
         } else {
