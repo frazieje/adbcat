@@ -6,6 +6,14 @@
 #include "hashtable.h"
 #include "utils.h"
 
+enum gateway_message_type { gw_msg_forward, gw_msg_close };
+
+typedef struct gateway_message_t {
+    enum gateway_message_type type; //
+    uint32_t from;
+    uint64_t length;
+} gateway_message_t;
+
 enum gateway_connection_mode { gateway_client, gateway_server, unknown };
 
 typedef struct gateway_connection_t {
@@ -13,6 +21,8 @@ typedef struct gateway_connection_t {
     char addr_str[ADDRESS_STRING_SIZE];
     unsigned char session_key[SESSION_KEY_SIZE];
     enum gateway_connection_mode type;
+    gateway_message_t *current_message;
+    uint64_t current_message_sent;
     struct gateway_connection_t *prev;
     struct gateway_connection_t *next;
 //    SSL *ssl;

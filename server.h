@@ -4,6 +4,7 @@
 #include <event2/listener.h>
 #include "hashtable.h"
 #include "adbcat.h"
+#include "gateway.h"
 
 static HashTable active_connections = HT_INITIALIZER
 
@@ -12,14 +13,6 @@ typedef struct adb_server_connection_t {
     struct bufferevent *gw_bev;
     uint32_t from;
 } adb_server_connection_t;
-
-enum gateway_message_type { gw_msg_forward, gw_msg_close };
-
-typedef struct gateway_message_t {
-    enum gateway_message_type type; //
-    uint32_t from;
-    uint64_t length;
-} gateway_message_t;
 
 typedef struct gateway_context_t {
     struct sockaddr *adbserver_addr;
