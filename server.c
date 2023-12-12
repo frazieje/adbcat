@@ -99,7 +99,6 @@ static void adb_eventcb(struct bufferevent *bev, short what, void *ctx) {
             printf("wrote %d bytes to close client %d\n", server_close_size, cxn->from);
         }
         closeClient(cxn);
-
     }
 }
 
