@@ -16,9 +16,13 @@ static void adb_readcb(struct bufferevent *bev, void *ctx);
 static void adb_eventcb(struct bufferevent *bev, short what, void *ctx);
 
 static void closeClient(uint32_t from, adb_server_connection_t *cxn) {
+    printf("close client 1");
     ht_erase(&active_connections, &from);
+    printf("close client 2");
     bufferevent_free(cxn->adb_bev);
+    printf("close client 3");
     evutil_closesocket(bufferevent_getfd(cxn->adb_bev));
+    printf("close client 4");
 }
 
 static void closeGateway(struct bufferevent *bev) {
@@ -45,6 +49,7 @@ static void closeGateway(struct bufferevent *bev) {
 }
 
 static void adb_drained_writecb(struct bufferevent *bev, void *ctx) {
+    printf("adb_drained_writecb\n");
     adb_server_connection_t *cxn = (adb_server_connection_t *)ctx;
     bufferevent_setcb(bev, adb_readcb, NULL, adb_eventcb, cxn);
     bufferevent_setwatermark(bev, EV_WRITE, 0, 0);
@@ -53,6 +58,7 @@ static void adb_drained_writecb(struct bufferevent *bev, void *ctx) {
 }
 
 static void gateway_drained_writecb(struct bufferevent *bev, void *ctx) {
+    printf("gateway_drained_writecb\n");
     size_t chain;
     HTNode* node;
     HTNode* next;
@@ -69,11 +75,13 @@ static void gateway_drained_writecb(struct bufferevent *bev, void *ctx) {
 }
 
 static void adb_eventcb(struct bufferevent *bev, short what, void *ctx) {
+    printf("adb_evetcb\n");
     if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
         if (what & BEV_EVENT_ERROR) {
             if (errno)
                 perror("connection error");
         }
+        printf("adb_eventcb eof or error\n");
         adb_server_connection_t *cxn = (adb_server_connection_t *)ctx;
         closeClient(cxn->from, cxn);
         printf("client %d connection closed, sending close to gw", cxn->from);
@@ -88,6 +96,7 @@ static void adb_eventcb(struct bufferevent *bev, short what, void *ctx) {
 }
 
 static void adb_readcb(struct bufferevent *bev, void *ctx) {
+    printf("adb_readcb\n");
     struct evbuffer *src, *dst;
     size_t len;
 
@@ -96,7 +105,7 @@ static void adb_readcb(struct bufferevent *bev, void *ctx) {
     src = bufferevent_get_input(bev);
     len = evbuffer_get_length(src);
 
-    printf("reading %lu bytes from client adb cxn (from %d)", len, cxn->from);
+    printf("reading %lu bytes from client adb cxn (from %d)\n", len, cxn->from);
 
     if (len > 0) {
         int server_fwd_preamble_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
@@ -144,7 +153,7 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
         memcpy(gw_ctx->session_key, &data[SESSION_OK_RESPONSE_SIZE], SESSION_KEY_SIZE);
         char session_key_str[SESSION_KEY_SIZE * 2 + 1];
         get_session_key_str(gw_ctx->session_key, session_key_str);
-        printf("local adb server shared via adbcat at %s", session_key_str);
+        printf("local adb server shared via adbcat at %s\n", session_key_str);
     }
     printf("read %lu from gateway...\n", len);
     while ((len = evbuffer_get_length(src)) > 0) {
@@ -166,12 +175,12 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
                 uint32_t from;
                 evbuffer_remove(src, &from, SERVER_MSG_FROM_SIZE);
                 adb_server_connection_t *cxn = ht_lookup(&active_connections, &from);
-                printf("process close message for client %d", from);
+                printf("process close message for client %d\n", from);
                 if (cxn != NULL) {
-                    printf("client %d has active connection with adb server, closing", from);
+                    printf("client %d has active connection with adb server, closing\n", from);
                     closeClient(from, cxn);
                 } else {
-                    printf("no active connection found for client %d", from);
+                    printf("no active connection found for client %d\n", from);
                 }
             } else if (strcmp(msg_type, SERVER_FWD_MSG) == 0) {
                 gateway_message_t *new_message = malloc(sizeof(gateway_message_t));
@@ -208,6 +217,7 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
             adb_server_connection_t newCxn = { .adb_bev = adb_server_bev, .gw_bev = bev, .from = message->from };
             ht_insert(&active_connections, &message->from, &newCxn);
             adb_server_connection_t *newCxnP = ht_lookup(&active_connections, &message->from);
+            printf("newCxnP has from %d\n", newCxnP->from);
             cxn = newCxnP;
             bufferevent_setcb(adb_server_bev, adb_readcb, NULL, adb_eventcb, newCxnP);
             bufferevent_enable(adb_server_bev, EV_READ|EV_WRITE);
@@ -232,15 +242,17 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
             free(gw_ctx->current_message);
         }
     }
-    printf("processed all bytes in buffer");
+    printf("processed all bytes in buffer\n");
 }
 
 static void gateway_eventcb(struct bufferevent *bev, short what, void *ctx) {
+    printf("gateway_eventcb\n");
     if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
         if (what & BEV_EVENT_ERROR) {
             if (errno)
                 perror("connection error");
         }
+        printf("gateway_eventcb eof or error\n");
         /* Flush all pending data */
         gateway_readcb(bev, ctx);
         closeGateway(bev);
@@ -253,55 +265,62 @@ int start_server(
         struct sockaddr *gateway_addr,
         socklen_t gateway_addr_len
 ) {
-
+    printf("Running in server mode\n");
     struct sockaddr_in6 adb_server;
     int sock;
     int ret;
+    struct addrinfo hints;
+    struct addrinfo *res_list, *res;
 
     ht_setup(&active_connections,
              sizeof(uint32_t),
              sizeof(adb_server_connection_t), 0);
 
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = 0;
+    hints.ai_protocol = 0;
+
+    char adb_port_str[32];
+    sprintf(adb_port_str, "%d", adb_server_port);
+    ret = getaddrinfo("localhost", adb_port_str, &hints, &res_list);
+    if (ret != 0) {
+        fprintf(stderr, "Error in getaddrinfo: %s\n", gai_strerror(ret));
+        return 1;
+    }
+
+    // try to connect to the provided adb server to make sure it's available
+    for (res = res_list; res != NULL; res = res->ai_next) {
+        sock = socket(res->ai_family, res->ai_socktype,
+                      res->ai_protocol);
+        if (sock == -1)
+            continue;
+
+        if (connect(sock, res->ai_addr, res->ai_addrlen) != -1) {
+            close(sock);
+            break;
+        } else {
+            close(sock);
+        }
+    }
+
+    if (res == NULL) {
+        fprintf(stderr, "Could not connect to adb server at localhost:%s\n", adb_port_str);
+        return 1;
+    }
+
     memset(&adb_server, 0, sizeof(adb_server));
-    adb_server.sin6_addr = in6addr_loopback;
-    adb_server.sin6_family = AF_INET6;
-    adb_server.sin6_port = htons(adb_server_port);
 
-    // First try to connect to the local adb server before we connect to the gateway.
-    sock = socket(adb_server.sin6_family, SOCK_STREAM, IPPROTO_TCP);
+    struct bufferevent *gateway_bev = bufferevent_socket_new(base, -1,
+                                         BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
 
-    if (sock == -1) {
-        perror("could not create socket");
+    if (bufferevent_socket_connect(gateway_bev,
+                                   (struct sockaddr *)gateway_addr, gateway_addr_len)<0) {
+        perror("bufferevent_socket_connect");
+        bufferevent_free(gateway_bev);
         return 1;
     }
-
-    if (connect(sock, (struct sockaddr *)&adb_server, sizeof(adb_server)) != -1) {
-        close(sock);
-    } else {
-        close(sock);
-        perror("could not connect to adb server");
-        return 1;
-    }
-
-    errno = 0;
-    sock = socket(adb_server.sin6_family, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == -1) {
-        perror("Failed to create socket");
-        return 1;
-    }
-
-    ret = connect(sock, (struct sockaddr*)gateway_addr, gateway_addr_len);
-    if (ret != 0) {
-        perror("Failed to connect to host");
-        return 1;
-    }
-    ret = evutil_make_socket_nonblocking(sock);
-    if (ret != 0) {
-        perror("Failed to set socket to non-blocking mode");
-        return 1;
-    }
-
-    struct bufferevent *gateway_bev = bufferevent_socket_new(base, sock, 0);
 
     if (gateway_bev == NULL) {
         perror("Failed to create socket-based bufferevent");
@@ -320,8 +339,8 @@ int start_server(
     gateway_context_t gw_ctx;
     memset(&gw_ctx, 0, sizeof(gateway_context_t));
     memcpy(gw_ctx.session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
-    gw_ctx.adbserver_addr = (struct sockaddr *)&adb_server;
-    gw_ctx.adbserver_addr_len = sizeof(adb_server);
+    gw_ctx.adbserver_addr = res->ai_addr;
+    gw_ctx.adbserver_addr_len = res->ai_addrlen;
     gw_ctx.current_message = NULL;
     gw_ctx.current_message_sent = 0;
     bufferevent_setcb(gateway_bev, gateway_readcb, NULL, gateway_eventcb, &gw_ctx);

@@ -314,34 +314,33 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     get_session_key_str(conn->session_key, session_key_str);
     printf("%s has session key %s\n", conn->addr_str, session_key_str);
 
-    printf("read %lu from %s ...\n", input_length, conn->addr_str);
     while ((input_length = evbuffer_get_length(input)) > 0) {
-        printf("%lu left in buffer...\n", input_length);
+        printf("%lu left in buffer from %s...\n", input_length, conn->addr_str);
         gateway_connection_t *peer = NULL;
         if (conn->type == gateway_server) {
-            printf("3\n");
+            printf("3 server\n");
             gateway_message_t *message = conn->current_message;
             if (message == NULL) {
-                printf("read new message from %s\n", conn->addr_str);
+                printf("read new server message from %s\n", conn->addr_str);
                 int min_msg_length = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
                 if (input_length < min_msg_length) {
-                    printf("not enough data to read server message from %s, aborting for now", conn->addr_str);
+                    printf("not enough data to read server message from %s, aborting for now\n", conn->addr_str);
                     return;
                 }
                 char msg_type[SERVER_MSG_TYPE_SIZE + 1];
                 evbuffer_remove(input, msg_type, SERVER_MSG_TYPE_SIZE);
                 msg_type[SERVER_MSG_TYPE_SIZE] = '\0';
                 if (strcmp(msg_type, SERVER_CLOSE_MSG) == 0) {
-                    printf("message from %s is a close message\n", conn->addr_str);
+                    printf("message from server %s is a close message\n", conn->addr_str);
                     uint32_t from;
                     evbuffer_remove(input, &from, SERVER_MSG_FROM_SIZE);
                     peer = get_client_connection(conn->session_key, from);
-                    printf("process close message for client %d", from);
+                    printf("process close message from server %s for client %d\n", conn->addr_str, from);
                     if (peer != NULL) {
-                        printf("client %d has active connection %s, closing", from, peer->addr_str);
+                        printf("client %d has active connection %s, closing\n", from, peer->addr_str);
                         closeClientOnFinished(peer);
                     } else {
-                        printf("no active connection found for client %d", from);
+                        printf("no active connection found for client %d on server %s\n", from, conn->addr_str);
                     }
                 } else if (strcmp(msg_type, SERVER_FWD_MSG) == 0) {
                     gateway_message_t *new_message = malloc(sizeof(gateway_message_t));
@@ -349,7 +348,7 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                     new_message->type = gw_msg_forward;
                     evbuffer_remove(input, &new_message->from, SERVER_MSG_FROM_SIZE);
                     evbuffer_remove(input, &new_message->length, SERVER_FWD_LENGTH_SIZE);
-                    printf("message is a fward message from %d, with length %lu\n", new_message->from,
+                    printf("message from server %s is a fward message for client %d, with length %lu\n", conn->addr_str, new_message->from,
                            new_message->length);
                     conn->current_message = new_message;
                     conn->current_message_sent = 0;
@@ -369,19 +368,37 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                 int msg_nbytes = evbuffer_remove(input, remaining_data, remaining);
                 evbuffer_add(peer_output, remaining_data, msg_nbytes);
                 conn->current_message_sent += msg_nbytes;
-                printf("wrote %d bytes to client %d\n", msg_nbytes, message->from);
-                if (message->length == conn->current_message_sent) {
-                    printf("message finished from %d\n", message->from);
-                    conn->current_message_sent = 0;
-                    conn->current_message = NULL;
-                    free(conn->current_message);
+                printf("wrote %d bytes to server %d\n", msg_nbytes, message->from);
+                if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
+                    printf("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
+                    bufferevent_setcb(peer->bev, readcb, drained_writecb,
+                                      eventcb, peer);
+                    bufferevent_setwatermark(peer->bev, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE / 2,
+                                             MAX_OUTPUT_BUFFER_SIZE);
+                    bufferevent_disable(bev, EV_READ);
                 }
+            } else {
+                printf("peer not found for client %s\n", conn->addr_str);
+                if (input_length <= MAX_INPUT_BUFFER_SIZE) {
+                    printf(", aborting for now \n");
+                    return;
+                }
+                //for servers, we're going to just drain the buffer
+                printf(", draining\n");
+                evbuffer_drain(input, input_length);
+            }
+            if (message->length == conn->current_message_sent) {
+                printf("message finished from %d\n", message->from);
+                conn->current_message_sent = 0;
+                conn->current_message = NULL;
+                free(conn->current_message);
             }
         } else {
             peer = get_server_connection(conn->session_key);
-            printf("4\n");
-            struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
+            printf("4 client\n");
             if (peer != NULL) {
+                printf("server peer %s found for %s, forwarding with preamble\n", peer->addr_str, conn->addr_str);
+                struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
                 uint32_t bevfd = bufferevent_getfd(conn->bev);
                 int server_fwd_preamble_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
                 unsigned char preamble[server_fwd_preamble_size];
@@ -390,45 +407,28 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                 memcpy(&preamble[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], &input_length,
                        SERVER_FWD_LENGTH_SIZE);
                 evbuffer_add(peer_output, preamble, server_fwd_preamble_size);
-            }
-        }
-        if (peer != NULL) {
-            printf("peer %s found for %s, forwarding\n", peer->addr_str, conn->addr_str);
-            struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
-            if (conn->type == gateway_client) {
-                uint32_t bevfd = bufferevent_getfd(conn->bev);
-                int server_fwd_preamble_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
-                unsigned char preamble[server_fwd_preamble_size];
-                memcpy(preamble, SERVER_FWD_MSG, SERVER_MSG_TYPE_SIZE);
-                memcpy(&preamble[SERVER_MSG_TYPE_SIZE], &bevfd, SERVER_MSG_FROM_SIZE);
-                memcpy(&preamble[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], &input_length,
-                       SERVER_FWD_LENGTH_SIZE);
-                evbuffer_add(peer_output, preamble, server_fwd_preamble_size);
-            }
-            evbuffer_add_buffer(peer_output, input);
-            if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
-                printf("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
-                bufferevent_setcb(peer->bev, readcb, drained_writecb,
-                                  eventcb, peer);
-                bufferevent_setwatermark(peer->bev, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE / 2,
-                                         MAX_OUTPUT_BUFFER_SIZE);
-                bufferevent_disable(bev, EV_READ);
-            }
-        } else {
-            printf("peer not found for client %s", conn->addr_str);
-            if (input_length <= MAX_INPUT_BUFFER_SIZE) {
-                printf(", aborting for now \n");
-                return;
-            }
-            if (conn->type == gateway_client || conn->type == unknown) {
-                //for clients (and unknowns), we're going to disconnect them if their peer has gone MIA
+                evbuffer_add_buffer(peer_output, input);
+                size_t total_bytes_sent = server_fwd_preamble_size + input_length;
+                printf("forwarded %lu bytes from client %s to server peer %s with from %d, forwarding with preamble\n", total_bytes_sent, peer->addr_str, conn->addr_str, bevfd);
+                if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
+                    printf("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
+                    bufferevent_setcb(peer->bev, readcb, drained_writecb,
+                                      eventcb, peer);
+                    bufferevent_setwatermark(peer->bev, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE / 2,
+                                             MAX_OUTPUT_BUFFER_SIZE);
+                    bufferevent_disable(bev, EV_READ);
+                }
+            } else {
+                printf("peer not found for client %s\n", conn->addr_str);
+                if (input_length <= MAX_INPUT_BUFFER_SIZE) {
+                    printf(", aborting for now \n");
+                    return;
+                }
+                //for clients, we're going to disconnect them if their peer has gone MIA
                 printf(", draining and disconnecting\n");
                 closeClient(conn);
-            } else {
-                //for servers, we're going to just drain the buffer
-                printf(", draining\n");
+                evbuffer_drain(input, input_length);
             }
-            evbuffer_drain(input, input_length);
         }
     }
 
@@ -442,9 +442,9 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
         gateway_connection_t *conn = (gateway_connection_t *) ctx;
         if (ctx != NULL) {
             printf("error callback for %s\n", conn->addr_str);
-            if (conn->type == server) {
+            if (conn->type == gateway_server) {
                 printf("server ");
-            } else if (conn->type == client) {
+            } else if (conn->type == gateway_client) {
                 printf("client ");
             } else {
                 printf("");
@@ -466,10 +466,25 @@ static void drained_writecb(struct bufferevent *bev, void *ctx) {
     bufferevent_setcb(bev, readcb, NULL, eventcb, ctx);
     bufferevent_setwatermark(bev, EV_WRITE, 0, 0);
 
-    gateway_connection_t *peer = get_peer_connection(conn);
-    if (peer != NULL) {
-        printf("re-enabling peer %s for %s\n", peer->addr_str, conn->addr_str);
-        bufferevent_enable(peer->bev, EV_READ);
+    if (conn->type == gateway_server) {
+        size_t chain;
+        HTNode* node;
+        HTNode* next;
+        for (chain = 0; chain < gateway_clients.capacity; ++chain) {
+            for (node = gateway_clients.nodes[chain]; node;) {
+                next = node->next;
+                struct gateway_connection_t *curr_conn = (gateway_connection_t *)node->value;
+                printf("re-enabling client %s for server %s\n", curr_conn->addr_str, conn->addr_str);
+                bufferevent_enable(curr_conn->bev, EV_READ);
+                node = next;
+            }
+        }
+    } else {
+        gateway_connection_t *peer = get_server_connection(conn->session_key);
+        if (peer != NULL) {
+            printf("re-enabling server %s for client %s\n", peer->addr_str, conn->addr_str);
+            bufferevent_enable(peer->bev, EV_READ);
+        }
     }
 }
 
@@ -508,7 +523,7 @@ static void accept_error_cb(struct evconnlistener *listener, void *ctx)
 }
 
 int start_gateway(struct event_base *base, int local_port) {
-
+    printf("Running in gateway mode\n");
     struct evconnlistener *listener;
     struct sockaddr_in6 sin;
 

@@ -138,7 +138,7 @@ int start_client(
         socklen_t gateway_addr_len,
         unsigned char *session_key
 ) {
-
+    printf("Running in client mode\n");
     struct evconnlistener *listener;
     struct sockaddr_in6 sin;
 

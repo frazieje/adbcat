@@ -11,7 +11,7 @@
 #include <server.h>
 
 int main(int argc, char **argv) {
-
+    printf("Starting adbcat v0.1\n");
     struct addrinfo hints;
     struct addrinfo *res_list, *res;
     struct event_base *base;
