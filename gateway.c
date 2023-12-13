@@ -98,6 +98,8 @@ static void add_client(gateway_connection_t *client) {
         if (dupe == NULL) {
             printf("adding new client to ll%s\n", client->addr_str);
             LL_ADD(client, existing_clients)
+            gateway_connection_ref_t ref = { .value = existing_clients };
+            ht_insert(&gateway_clients, client->session_key, &ref);
         }
     } else {
         printf("adding new client to ht%s\n", client->addr_str);
