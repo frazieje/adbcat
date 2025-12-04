@@ -4,7 +4,7 @@ Securely bridge ADB clients &amp; servers across networks
 ## Why?
 
 Have you ever been working with a remote developer or QA engineer, and needed to access their locally-connected 
-ADB devices? adbcat is a tool that allows you to do just that. adbcat works across the internet and requires basically
+ADB devices? adbcat is a cross-platform command-line tool that allows you to do just that. adbcat works across the internet and requires basically
 zero setup.
 
 ## Basics
