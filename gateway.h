@@ -1,10 +1,6 @@
 #ifndef ADBCAT_GATEWAY_H
 #define ADBCAT_GATEWAY_H
-
-#include <event2/listener.h>
-#include "adbcat.h"
-#include "hashtable.h"
-#include "utils.h"
+#include <stdint.h>
 
 enum gateway_message_type { gw_msg_forward, gw_msg_close };
 
@@ -14,35 +10,29 @@ typedef struct gateway_message_t {
     uint64_t length;
 } gateway_message_t;
 
-enum gateway_connection_mode { gateway_client, gateway_server, unknown };
-
-typedef struct gateway_connection_t {
-    struct bufferevent *bev;
-    char addr_str[ADDRESS_STRING_SIZE];
-    unsigned char session_key[SESSION_KEY_SIZE];
-    enum gateway_connection_mode type;
-    gateway_message_t *current_message;
-    uint64_t current_message_sent;
-    struct gateway_connection_t *prev;
-    struct gateway_connection_t *next;
-//    SSL *ssl;
-} gateway_connection_t;
-
-typedef struct gateway_connection_ref_t {
-    gateway_connection_t *value;
-} gateway_connection_ref_t;
-
-static HashTable gateway_clients = HT_INITIALIZER
-static HashTable gateway_servers = HT_INITIALIZER
+typedef struct gateway_config_t {
+    int port;
+    char *cert_path;
+    char *key_path;
+    int enable_cleartext;
+    int enable_verbose;
+} gateway_config_t;
 
 /**
  * Start the gateway. The gateway accepts connections from adbcat servers and clients, and relays data between
  * connections with matching session keys.
  *
+ * @param config the gateway config
+ */
+/*
  * @param base the libevent event_base to listen on
  * @param local_port the local port to listen on
- * @return exit code
+ * @param cert_path path to TLS certificate PEM file
+ * @param cert_path_len length of the path to TLS certificate PEM file
+ * @param key_path path to TLS key PEM file
+ * @param key_path_len length of the path to TLS key PEM file
+ * @param enable_cleartext enable cleartext communication. Disabled by default
  */
-int start_gateway(struct event_base *base, int local_port);
+int start_gateway(gateway_config_t *config);
 
 #endif //ADBCAT_GATEWAY_H

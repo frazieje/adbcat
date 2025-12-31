@@ -1,32 +1,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <event2/event.h>
 #include <event2/bufferevent.h>
-#include <adbcat.h>
-#include <utils.h>
-#include <unistd.h>
-#include <gateway.h>
-#include <client.h>
-#include <server.h>
+#include "adbcat.h"
+#include "utils.h"
+#include "gateway.h"
+#include "client.h"
+#include "server.h"
 
 int main(int argc, char **argv) {
-    printf("Starting adbcat v0.1\n");
+    printf("Starting adbcat v0.2\n");
     struct addrinfo hints;
     struct addrinfo *res_list, *res;
     struct event_base *base;
     char g_port[NI_MAXSERV + 1] = DEFAULT_GATEWAY_PORT;
     char l_port[NI_MAXSERV + 1] = DEFAULT_LOCAL_LISTEN_PORT;
     enum adbcat_type type;
-    char usage_str[] = "Usage: %s [-h gateway host] [-u gateway port] [-p local port] [session key | 'gateway']\n";
+    int enable_cleartext = 0;
+    int enable_verbose = 0;
+    char usage_str[] = "Usage: %s [-h gateway host] [-u gateway port] [-t gateway cert path (PEM)] [-k gateway key path (PEM)] [-p local port] [session key | 'gateway']\n";
 
     char g_host[NI_MAXHOST + 1] = DEFAULT_GATEWAY_HOST; // gateway host
+    char g_cert_chain[MAX_FILE_PATH] = DEFAULT_GATEWAY_CERT;
+    char g_key[MAX_FILE_PATH] = DEFAULT_GATEWAY_KEY;
 
     unsigned char session_key[SESSION_KEY_SIZE];
 
     int opt;
     opterr = 0;
-    while ((opt = getopt(argc, argv, "h:p:u:")) != -1) {
+    while ((opt = getopt(argc, argv, "h:p:u:t:k:vc")) != -1) {
         switch (opt) {
             case 'h':
                 if (strlen(optarg) > NI_MAXHOST) {
@@ -48,6 +52,26 @@ int main(int argc, char **argv) {
                     exit(EXIT_FAILURE);
                 }
                 strcpy(g_port, optarg);
+                break;
+            case 't':
+                if (strlen(optarg) > MAX_FILE_PATH - 1) {
+                    fprintf(stderr, "gateway cert path too long\n");
+                    exit(EXIT_FAILURE);
+                }
+                strcpy(g_cert_chain, optarg);
+                break;
+            case 'k':
+                if (strlen(optarg) > MAX_FILE_PATH - 1) {
+                    fprintf(stderr, "gateway key path too long\n");
+                    exit(EXIT_FAILURE);
+                }
+                strcpy(g_key, optarg);
+                break;
+            case 'v':
+                enable_verbose = 1;
+                break;
+            case 'c':
+                enable_cleartext = 1;
                 break;
             default: /* '?' */
                 break;
@@ -93,12 +117,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    base = event_base_new();
-    if (!base) {
-        fprintf(stderr, "Couldn't open event base\n");
-        return 1;
-    }
-
     memset(&hints, 0, sizeof(struct addrinfo));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -141,17 +159,25 @@ int main(int argc, char **argv) {
 
     switch(type) {
         case gateway:
-            return start_gateway(base, (int)l_port_i);
+            gateway_config_t config = {
+            .port = (int)l_port_i,
+            .cert_path = g_cert_chain,
+            .key_path = g_key,
+            .enable_cleartext = enable_cleartext,
+            .enable_verbose = enable_verbose
+        };
+            return start_gateway(&config);
         case client:
             return start_client(
-                base,
                 (int)l_port_i,
                 res->ai_addr,
                 res->ai_addrlen,
-                session_key
+                session_key,
+                enable_cleartext,
+                enable_verbose
             );
         case server:
-            return start_server(base, (int)l_port_i, res->ai_addr, res->ai_addrlen);
+            return start_server((int)l_port_i, res->ai_addr, res->ai_addrlen, enable_cleartext, enable_verbose);
         default:
             return EXIT_FAILURE;
     }

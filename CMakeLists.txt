@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 4.0)
 project(adbcat C)
 
 set(CMAKE_C_STANDARD 11)
@@ -10,10 +10,13 @@ if (PKG_CONFIG_FOUND)
         message(STATUS "Found libevent ${LIBEVENT_FOUND}")
         message(STATUS "libevent inc : ${LIBEVENT_INCLUDE_DIRS}")
         message(STATUS "libevent lib : ${LIBEVENT_LIBRARIES}")
+        message(STATUS "libevent tls : ${LIBEVENT_OPENSSL_LIBRARIES}")
     endif()
 endif()
 
 set(LIBEVENT_STATIC_LINK TRUE)
+
+find_package(OpenSSL REQUIRED)
 
 add_executable(${PROJECT_NAME}
         gateway.c
@@ -31,4 +34,4 @@ if (LINUX)
 else()
     set(ADDL_LIBS "")
 endif()
-target_link_libraries(${PROJECT_NAME} PUBLIC ${LIBEVENT_LIBRARIES} ${ADDL_LIBS})
+target_link_libraries(${PROJECT_NAME} PUBLIC ${LIBEVENT_OPENSSL_LIBRARIES} event_openssl event ${ADDL_LIBS} OpenSSL::SSL OpenSSL::Crypto)

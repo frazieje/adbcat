@@ -36,7 +36,6 @@ void get_session_key_str(unsigned char *session_key, char *target) {
     target[SESSION_KEY_SIZE * 2] = '\0';
 }
 
-
 void address_to_str(struct sockaddr *sin, int socklen, char *dest, size_t max_length) {
     char host[NI_MAXHOST + 1];
     char port[NI_MAXSERV + 1];
