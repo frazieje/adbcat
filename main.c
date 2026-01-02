@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
     printf("Starting adbcat v0.2\n");
     struct addrinfo hints;
     struct addrinfo *res_list, *res;
-    struct event_base *base;
+    gateway_config_t gw_config;
     char g_port[NI_MAXSERV + 1] = DEFAULT_GATEWAY_PORT;
     char l_port[NI_MAXSERV + 1] = DEFAULT_LOCAL_LISTEN_PORT;
     enum adbcat_type type;
@@ -159,14 +159,16 @@ int main(int argc, char **argv) {
 
     switch(type) {
         case gateway:
-            gateway_config_t config = {
-            .port = (int)l_port_i,
-            .cert_path = g_cert_chain,
-            .key_path = g_key,
-            .enable_cleartext = enable_cleartext,
-            .enable_verbose = enable_verbose
-        };
-            return start_gateway(&config);
+            gw_config = (gateway_config_t) {
+                .port = (int)l_port_i,
+                .cert_path = g_cert_chain,
+                .cert_path_len = (int) strlen(g_cert_chain),
+                .key_path = g_key,
+                .key_path_len = (int) strlen(g_key),
+                .enable_cleartext = enable_cleartext,
+                .enable_verbose = enable_verbose
+            };
+            return start_gateway(&gw_config);
         case client:
             return start_client(
                 (int)l_port_i,

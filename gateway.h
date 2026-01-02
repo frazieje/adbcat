@@ -13,7 +13,9 @@ typedef struct gateway_message_t {
 typedef struct gateway_config_t {
     int port;
     char *cert_path;
+    int cert_path_len;
     char *key_path;
+    int key_path_len;
     int enable_cleartext;
     int enable_verbose;
 } gateway_config_t;

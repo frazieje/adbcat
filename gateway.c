@@ -642,11 +642,19 @@ static int configure_ssl_ctx(gateway_config_t *config, SSL_CTX *ssl_ctx) {
     SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1_2);
     SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1_1);
 
-    if (SSL_CTX_use_certificate_chain_file(ssl_ctx, config->cert_path) != 1) {
+    char cert_path[config->cert_path_len + 1];
+    char key_path[config->key_path_len + 1];
+
+    memcpy(cert_path, config->cert_path, config->cert_path_len);
+    cert_path[config->cert_path_len] = '\0';
+    memcpy(key_path, config->key_path, config->key_path_len);
+    key_path[config->key_path_len] = '\0';
+
+    if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_path) != 1) {
         SSL_CTX_free(ssl_ctx);
         return 1;
     }
-    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, config->key_path, SSL_FILETYPE_PEM) != 1) {
+    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_path, SSL_FILETYPE_PEM) != 1) {
         SSL_CTX_free(ssl_ctx);
         return 2;
     }
