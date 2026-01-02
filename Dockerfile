@@ -1,4 +1,4 @@
-FROM debian:12 as Builder
+FROM debian:12 AS builder
 
 RUN apt-get update && apt-get install -y cmake \
     && apt-get install -y pkg-config libevent-dev libbsd-dev libssl-dev
@@ -8,8 +8,8 @@ WORKDIR /app
 
 RUN cmake . && make
 
-FROM debian:12 as Runtime
-COPY --from=Builder /app/adbcat /usr/local/bin
+FROM debian:12 AS runtime
+COPY --from=builder /app/adbcat /usr/local/bin
 
 RUN apt-get update \
     && apt-get install -y libevent-dev libbsd-dev
