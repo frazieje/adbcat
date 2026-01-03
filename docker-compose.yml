@@ -1,0 +1,15 @@
+services:
+  adbcat:
+    build: .
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10M"
+        max-file: "5"
+    ports:
+      - 42821:42821
+    volumes:
+      - /etc/letsencrypt/live/adbcat.frazieje.com/fullchain.pem:/etc/letsencrypt/live/adbcat.frazieje.com/fullchain.pem
+      - /etc/letsencrypt/live/adbcat.frazieje.com/privkey.pem:/etc/letsencrypt/live/adbcat.frazieje.com/privkey.pem
+    command:
+      gateway -t /etc/letsencrypt/live/adbcat.frazieje.com/fullchain.pem -k /etc/letsencrypt/live/adbcat.frazieje.com/privkey.pem
