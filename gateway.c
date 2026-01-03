@@ -621,6 +621,8 @@ static void accept_conn_cb(
 
     bufferevent_setcb(bev, readcb, NULL, eventcb, conn);
     bufferevent_enable(bev, EV_READ | EV_WRITE);
+
+    fflush(stdout);
 }
 
 static void accept_error_cb(struct evconnlistener *listener, void *ctx)
@@ -745,6 +747,8 @@ int start_gateway(gateway_config_t *config) {
 
     printf("Listening on %s\n", addr_str);
     evconnlistener_set_error_cb(listener, accept_error_cb);
+
+    fflush(stdout);
 
     return event_base_dispatch(base);
 }
