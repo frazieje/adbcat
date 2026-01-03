@@ -33,6 +33,7 @@ static void client_log(char *str, ...) {
         va_start(valist, str);
         vfprintf(stdout, str, valist);
         va_end(valist);
+        fflush(stdout);
     }
 }
 

@@ -63,6 +63,7 @@ static void gateway_log(char *str, ...) {
         va_start(valist, str);
         vfprintf(stdout, str, valist);
         va_end(valist);
+        fflush(stdout);
     }
 }
 
@@ -242,6 +243,7 @@ static gateway_connection_t *get_client_connection(unsigned char *session_key, u
             curr = curr->next;
         }
     }
+    return NULL;
 }
 
 static void printConnection(gateway_connection_t *conn) {
@@ -621,8 +623,6 @@ static void accept_conn_cb(
 
     bufferevent_setcb(bev, readcb, NULL, eventcb, conn);
     bufferevent_enable(bev, EV_READ | EV_WRITE);
-
-    fflush(stdout);
 }
 
 static void accept_error_cb(struct evconnlistener *listener, void *ctx)
@@ -747,8 +747,6 @@ int start_gateway(gateway_config_t *config) {
 
     printf("Listening on %s\n", addr_str);
     evconnlistener_set_error_cb(listener, accept_error_cb);
-
-    fflush(stdout);
 
     return event_base_dispatch(base);
 }
