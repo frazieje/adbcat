@@ -1,7 +1,7 @@
 FROM debian:12 as Builder
 
 RUN apt-get update && apt-get install -y cmake \
-    && apt-get install -y pkg-config libevent-dev libbsd-dev
+    && apt-get install -y pkg-config libevent-dev libbsd-dev libssl-dev
 
 COPY . /app
 WORKDIR /app
