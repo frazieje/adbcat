@@ -650,6 +650,11 @@ static int configure_ssl_ctx(gateway_config_t *config, SSL_CTX *ssl_ctx) {
     memcpy(key_path, config->key_path, config->key_path_len);
     key_path[config->key_path_len] = '\0';
 
+    if (config->enable_verbose) {
+        printf("Loading cert from path: %s", cert_path);
+        printf("Loading key from path: %s", key_path);
+    }
+
     if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_path) != 1) {
         SSL_CTX_free(ssl_ctx);
         return 1;
@@ -682,7 +687,21 @@ int start_gateway(gateway_config_t *config) {
 
         int result = configure_ssl_ctx(config, ssl_ctx);
         if (result > 0) {
-            fprintf(stderr, "Could not configure TLS context\n");
+            fprintf(stderr, "Could not configure TLS context: ");
+            switch (result) {
+                case 1:
+                    printf("Problem loading TLS certificate file\n");
+                    break;
+                case 2:
+                    printf("Problem loading TLS key file\n");
+                    break;
+                case 3:
+                    printf("Private key check failed\n");
+                    break;
+                default:
+                    printf("Unknown error\n");
+                    break;
+            }
             return result;
         }
     }
