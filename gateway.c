@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <unistd.h>
 #include <netinet/in.h>
 #include "adbcat.h"
 #include "hashtable.h"
@@ -633,7 +634,6 @@ static void accept_error_cb(struct evconnlistener *listener, void *ctx)
 }
 
 static int configure_ssl_ctx(gateway_config_t *config, SSL_CTX *ssl_ctx) {
-
     SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
 
@@ -651,8 +651,11 @@ static int configure_ssl_ctx(gateway_config_t *config, SSL_CTX *ssl_ctx) {
     key_path[config->key_path_len] = '\0';
 
     if (config->enable_verbose) {
-        printf("Loading cert from path: %s", cert_path);
-        printf("Loading key from path: %s", key_path);
+        char current_wd[MAX_FILE_PATH];
+        getcwd(current_wd, sizeof(current_wd));
+        printf("Loading cert from path: %s\n", cert_path);
+        printf("Loading key from path: %s\n", key_path);
+        printf("Current working directory: %s\n", current_wd);
     }
 
     if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_path) != 1) {
