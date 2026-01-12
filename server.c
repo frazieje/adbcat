@@ -118,7 +118,7 @@ static void adb_eventcb(struct bufferevent *bev, short what, void *ctx) {
         }
         server_log("adb_eventcb eof or error\n");
 
-        adb_server_connection_t *cxn = (adb_server_connection_t *)ctx;
+        adb_server_connection_t *cxn = ctx;
 
         unsigned char length[SERVER_FWD_LENGTH_SIZE] = {0};
         int server_close_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
@@ -140,7 +140,7 @@ static void adb_readcb(struct bufferevent *bev, void *ctx) {
     struct evbuffer *src, *dst;
     size_t len;
 
-    adb_server_connection_t *cxn = (adb_server_connection_t *)ctx;
+    adb_server_connection_t *cxn = ctx;
     dst = bufferevent_get_output(cxn->gw_bev);
     src = bufferevent_get_input(bev);
     len = evbuffer_get_length(src);
@@ -420,6 +420,8 @@ int start_server(
             BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
         if (!gateway_bev)
             SSL_free(ssl);
+
+        bufferevent_openssl_set_allow_dirty_shutdown(gateway_bev, 1);
     } else {
         gateway_bev = bufferevent_socket_new(base, -1,
         BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);

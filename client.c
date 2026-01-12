@@ -165,6 +165,8 @@ static void accept_conn_cb(
             perror("Failed to create TLS-enabled bufferevent");
             return;
         }
+
+        bufferevent_openssl_set_allow_dirty_shutdown(gateway_bev, 1);
     } else {
         gateway_bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
         if (!gateway_bev) {

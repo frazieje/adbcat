@@ -38,6 +38,7 @@ typedef struct gateway_connection_t {
     enum gateway_connection_mode type;
     gateway_message_t *current_message;
     uint64_t current_message_sent;
+    int closing;
     struct gateway_connection_t *prev;
     struct gateway_connection_t *next;
 } gateway_connection_t;
@@ -177,9 +178,47 @@ static void close_on_finished_writecb(struct bufferevent *bev, void *ctx) {
     }
 }
 
+static int drive_tls_shutdown(gateway_connection_t *conn) {
+    const int r = SSL_shutdown(bufferevent_openssl_get_ssl(conn->bev));
+    gateway_log("closing client %s ssl_shutdown returned %d\n", conn->addr_str, r);
+    if (r == 1) {
+        return 1;
+    }
+    if (r == 0) {
+        // close_notify sent, waiting for peer's close_notify
+        // keep the connection alive and keep reading
+        bufferevent_enable(conn->bev, EV_READ | EV_WRITE);
+        return 0;
+    }
+
+    int err = SSL_get_error(bufferevent_openssl_get_ssl(conn->bev), r);
+    if (err == SSL_ERROR_WANT_READ) {
+        gateway_log("closing client %s ssl error want read\n", conn->addr_str);
+        bufferevent_enable(conn->bev, EV_READ);
+        return 0;
+    }
+    if (err == SSL_ERROR_WANT_WRITE) {
+        gateway_log("closing client %s ssl error want write\n", conn->addr_str);
+        bufferevent_enable(conn->bev, EV_WRITE);
+        return 0;
+    }
+    gateway_log("closing client %s ssl error %d\n", conn->addr_str, err);
+
+    return -1;
+}
+
 static int closeClient(gateway_connection_t *conn) {
     gateway_log("closing client %s\n", conn->addr_str);
     int result = 0;
+    conn->closing = 1;
+
+    // if (!gw_settings.cleartext_enabled) {
+    //     int r = drive_tls_shutdown(conn);
+    //     if (r != -1 && r != 1) {
+    //         return 0;
+    //     }
+    // }
+
     if (conn->type == gateway_client) {
         result = remove_client(conn);
     } else if (conn->type == gateway_server) {
@@ -193,20 +232,33 @@ static int closeClient(gateway_connection_t *conn) {
 
 static void closeClientOnFinished(gateway_connection_t *conn) {
     gateway_log("closing client %s on finished\n", conn->addr_str);
-    if (conn->type == gateway_client) {
-        remove_client(conn);
-    } else if (conn->type == gateway_server) {
-        remove_server(conn);
-    }
     if (evbuffer_get_length(
             bufferevent_get_output(conn->bev)) > 0) {
+        if (conn->type == gateway_client) {
+            remove_client(conn);
+        } else if (conn->type == gateway_server) {
+            remove_server(conn);
+        }
         gateway_log("closing client %s on finished write\n", conn->addr_str);
         bufferevent_setcb(conn->bev,
                           NULL, close_on_finished_writecb,
                           eventcb, conn);
         bufferevent_disable(conn->bev, EV_READ);
     } else {
-        gateway_log("closing client %s now\n", conn->addr_str);
+        // gateway_log("closing client %s now\n", conn->addr_str);
+        // gateway_log("sending shutdown to client %s\n", conn->addr_str);
+        // if (!gw_settings.cleartext_enabled) {
+        //     int r = drive_tls_shutdown(conn);
+        //     if (r != -1 && r != 1) {
+        //         return;
+        //     }
+        // }
+        if (conn->type == gateway_client) {
+            remove_client(conn);
+        } else if (conn->type == gateway_server) {
+            remove_server(conn);
+        }
+        printf("closing client %s freeing resources\n", conn->addr_str);
         bufferevent_free(conn->bev);
         free(conn);
     }
@@ -290,6 +342,58 @@ static void printConnections() {
     printf("Total: %d\n\n", count);
 }
 
+static int has_active_session(gateway_connection_t *conn) {
+    return memcmp(conn->session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
+}
+
+static int read_conn_type(enum gateway_connection_mode* result, char *addr_str, char *buf, size_t length) {
+    int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
+    char data[min_length];
+    int nbytes;
+    size_t input_length;
+    if (*result != unknown) {
+        return 1;
+    }
+    gateway_log("%s has no session type\n", addr_str);
+    //session is not yet set, try to read start line
+    if (length < min_length) {
+        gateway_log("short read from new client %s, aborting for now\n", addr_str);
+        return 0;
+    }
+    nbytes = evbuffer_remove(input, data, min_length); //remove maximum size of first line
+    gateway_log("removed %d from buffer of length %lu\n", nbytes, input_length);
+    int magicBytes = memcmp(data, MAGIC_BYTES, MAGIC_BYTES_SIZE);
+    if (magicBytes != 0) {
+        fprintf(stderr, "new client %s handshake failed 0x143\n", conn->addr_str);
+        return -1;
+    }
+    if (memcmp(&data[MAGIC_BYTES_SIZE], SESSION_TYPE_CLIENT, SESSION_TYPE_SIZE) == 0) {
+        gateway_log("%s indicated a client session type\n", conn->addr_str);
+        conn->type = gateway_client;
+    } else if (memcmp(&data[MAGIC_BYTES_SIZE], SESSION_TYPE_SERVER, SESSION_TYPE_SIZE) == 0) {
+        gateway_log("%s indicated a server session type\n", conn->addr_str);
+        conn->type = gateway_server;
+    } else {
+        fprintf(stderr, "new client %s handshake failed 0x322\n", conn->addr_str);
+        return -2;
+    }
+    return 1;
+}
+
+static int read_session_key(gateway_connection_t *conn) {
+    size_t input_length;
+    struct evbuffer *input = bufferevent_get_input(conn->bev);
+    input_length = evbuffer_get_length(input);
+    if (input_length < SESSION_KEY_SIZE) {
+        gateway_log("short read from client session %s, aborting for now\n", conn->addr_str);
+        return 0;
+    }
+    evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE);
+    return 1;
+}
+
+static int
+
 static void readcb(struct bufferevent *bev, void *ctx) {
     gateway_connection_t *conn = ctx;
 
@@ -299,8 +403,44 @@ static void readcb(struct bufferevent *bev, void *ctx) {
 
     gateway_log("read bytes from %s\n", conn->addr_str);
 
+    // if (!gw_settings.cleartext_enabled) {
+    //     if (conn->closing) {
+    //         gateway_log("conn %s is closing, calling closeClient\n", conn->addr_str);
+    //         closeClient(conn);
+    //         return;
+    //     }
+    // }
+
     struct evbuffer *input = bufferevent_get_input(bev);
     struct evbuffer *output = bufferevent_get_output(bev);
+
+    if (!has_active_session(conn)) {
+
+        int res;
+
+        res = read_conn_type(conn);
+
+        if (res == 0)
+            return;
+
+        if (res < 0) {
+            closeClient(conn);
+            return;
+        }
+
+        if (conn->type == gateway_client) {
+            res = read_session_key(conn);
+
+            if (res == 0)
+                return;
+        }
+
+        if (conn->type == gateway_server) {
+            gen_session_key(conn->session_key, SESSION_KEY_SIZE);
+
+        }
+
+    }
 
     int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
     char data[min_length];
@@ -600,6 +740,8 @@ static void accept_conn_cb(
             perror("Failed to create TLS-enabled bufferevent");
             return;
         }
+
+        bufferevent_openssl_set_allow_dirty_shutdown(bev, 1);
     } else {
         bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
         if (!bev) {
@@ -616,6 +758,7 @@ static void accept_conn_cb(
     address_to_str(address, socklen, conn->addr_str, ADDRESS_STRING_SIZE);
     conn->next = NULL;
     conn->prev = NULL;
+    conn->closing = 0;
     conn->current_message = NULL;
     conn->current_message_sent = 0;
 
