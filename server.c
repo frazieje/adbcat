@@ -282,8 +282,8 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
         if (message->length == gw_ctx->current_message_sent) {
             server_log("message finished from %d\n", message->from);
             gw_ctx->current_message_sent = 0;
-            gw_ctx->current_message = NULL;
             free(gw_ctx->current_message);
+            gw_ctx->current_message = NULL;
         }
     }
     server_log("processed all bytes in buffer\n");
