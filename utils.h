@@ -9,7 +9,7 @@
 
 void gen_session_key(unsigned char *target, int length);
 
-void get_session_key_str(unsigned char *session_key, char *target);
+void get_session_key_str(char *target, const unsigned char *session_key);
 
 void address_to_str(struct sockaddr *sin, int socklen, char *dest, size_t max_length);
 

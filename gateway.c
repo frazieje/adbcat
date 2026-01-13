@@ -15,6 +15,13 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#define READ_RESULT_SHORT_READ 0
+#define READ_RESULT_OK 1
+#define READ_RESULT_ERROR (-1)
+
+#define WRITE_RESULT_OK 1
+#define WRITE_RESULT_ERROR (-1)
+
 #define LL_ADD(item, list) { \
     item->prev = NULL; \
     item->next = list; \
@@ -131,7 +138,7 @@ static int add_client(gateway_connection_t *client) {
     if (client == NULL) {
         return 0;
     }
-    gateway_connection_ref_t *existing_clients_ref = ht_lookup( &gateway_clients,client->session_key);
+    gateway_connection_ref_t *existing_clients_ref = ht_lookup(&gateway_clients, client->session_key);
     gateway_connection_t *existing_clients = NULL;
     if (existing_clients_ref != NULL) {
         existing_clients = existing_clients_ref->value;
@@ -300,7 +307,7 @@ static gateway_connection_t *get_client_connection(unsigned char *session_key, u
 
 static void printConnection(gateway_connection_t *conn) {
     char session_key_str[SESSION_KEY_SIZE * 2 + 1];
-    get_session_key_str(conn->session_key, session_key_str);
+    get_session_key_str(session_key_str, conn->session_key);
     if (conn->type == gateway_server) {
         printf("%s server %s\n", session_key_str, conn->addr_str);
     } else {
@@ -342,30 +349,32 @@ static void printConnections() {
     printf("Total: %d\n\n", count);
 }
 
+static int has_conn_type(gateway_connection_t *conn) {
+    return conn->type == gateway_server || conn->type == gateway_client;
+}
+
 static int has_active_session(gateway_connection_t *conn) {
     return memcmp(conn->session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
 }
 
-static int read_conn_type(enum gateway_connection_mode* result, char *addr_str, char *buf, size_t length) {
-    int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
+static int read_conn_type(gateway_connection_t *conn) {
+    const int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
     char data[min_length];
-    int nbytes;
-    size_t input_length;
-    if (*result != unknown) {
-        return 1;
+    if (conn->type != unknown) {
+        return READ_RESULT_OK;
     }
-    gateway_log("%s has no session type\n", addr_str);
+    struct evbuffer *input = bufferevent_get_input(conn->bev);
+    const size_t input_length = evbuffer_get_length(input);
     //session is not yet set, try to read start line
-    if (length < min_length) {
-        gateway_log("short read from new client %s, aborting for now\n", addr_str);
-        return 0;
+    if (evbuffer_get_length(input) < min_length) {
+        gateway_log("short read from new client %s, aborting for now\n", conn->addr_str);
+        return READ_RESULT_SHORT_READ;
     }
-    nbytes = evbuffer_remove(input, data, min_length); //remove maximum size of first line
+    int nbytes = evbuffer_remove(input, data, min_length); //remove maximum size of first line
     gateway_log("removed %d from buffer of length %lu\n", nbytes, input_length);
-    int magicBytes = memcmp(data, MAGIC_BYTES, MAGIC_BYTES_SIZE);
-    if (magicBytes != 0) {
+    if (memcmp(data, MAGIC_BYTES, MAGIC_BYTES_SIZE) != 0) {
         fprintf(stderr, "new client %s handshake failed 0x143\n", conn->addr_str);
-        return -1;
+        return READ_RESULT_ERROR;
     }
     if (memcmp(&data[MAGIC_BYTES_SIZE], SESSION_TYPE_CLIENT, SESSION_TYPE_SIZE) == 0) {
         gateway_log("%s indicated a client session type\n", conn->addr_str);
@@ -375,24 +384,50 @@ static int read_conn_type(enum gateway_connection_mode* result, char *addr_str, 
         conn->type = gateway_server;
     } else {
         fprintf(stderr, "new client %s handshake failed 0x322\n", conn->addr_str);
-        return -2;
+        return READ_RESULT_ERROR;
     }
-    return 1;
+    return READ_RESULT_OK;
 }
 
 static int read_session_key(gateway_connection_t *conn) {
-    size_t input_length;
     struct evbuffer *input = bufferevent_get_input(conn->bev);
-    input_length = evbuffer_get_length(input);
+    const size_t input_length = evbuffer_get_length(input);
     if (input_length < SESSION_KEY_SIZE) {
         gateway_log("short read from client session %s, aborting for now\n", conn->addr_str);
-        return 0;
+        return READ_RESULT_SHORT_READ;
     }
-    evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE);
-    return 1;
+    if (evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE) == SESSION_KEY_SIZE) {
+        return READ_RESULT_OK;
+    }
+    return READ_RESULT_ERROR;
 }
 
-static int
+static int send_session_key_response(const gateway_connection_t *conn, const unsigned char *session_key) {
+    struct evbuffer *output = bufferevent_get_output(conn->bev);
+    unsigned char response[SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE];
+    memcpy(response, SESSION_OK_RESPONSE, SESSION_OK_RESPONSE_SIZE);
+    memcpy(&response[SESSION_OK_RESPONSE_SIZE], session_key, SESSION_KEY_SIZE);
+    if (evbuffer_add(output, response, SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE) == 0) {
+        return WRITE_RESULT_OK;
+    }
+    return WRITE_RESULT_ERROR;
+}
+
+static int process_gateway_read(gateway_connection_t *conn) {
+    struct evbuffer *input = bufferevent_get_input(conn->bev);
+    size_t input_length = evbuffer_get_length(input);
+    while ((input_length = evbuffer_get_length(input)) > 0) {
+        gateway_log("%lu left in buffer from %s...\n", input_length, conn->addr_str);
+        if (conn->type == gateway_server) {
+            process_server_read(conn);
+        } else if (conn->type == gateway_client) {
+            process_client_read(conn);
+        } else {
+            return READ_RESULT_ERROR;
+        }
+    }
+    return READ_RESULT_OK;
+}
 
 static void readcb(struct bufferevent *bev, void *ctx) {
     gateway_connection_t *conn = ctx;
@@ -414,94 +449,49 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     struct evbuffer *input = bufferevent_get_input(bev);
     struct evbuffer *output = bufferevent_get_output(bev);
 
-    if (!has_active_session(conn)) {
+    int res;
 
-        int res;
-
+    if (!has_conn_type(conn)) {
+        gateway_log("%s does not have a connection type\n", conn->addr_str);
         res = read_conn_type(conn);
-
-        if (res == 0)
+        if (res == READ_RESULT_SHORT_READ)
             return;
-
-        if (res < 0) {
+        if (res == READ_RESULT_ERROR) {
             closeClient(conn);
             return;
         }
-
-        if (conn->type == gateway_client) {
-            res = read_session_key(conn);
-
-            if (res == 0)
-                return;
-        }
-
-        if (conn->type == gateway_server) {
-            gen_session_key(conn->session_key, SESSION_KEY_SIZE);
-
-        }
-
     }
 
-    int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
-    char data[min_length];
-    int nbytes;
-    size_t input_length;
-    if (memcmp(conn->session_key, EMPTY_SESSION, SESSION_KEY_SIZE) == 0) {
-        if (conn->type == unknown) {
-            gateway_log("%s has no session type\n", conn->addr_str);
-            //session is not yet set, try to read start line
-            input_length = evbuffer_get_length(input);
-            if (input_length < min_length) {
-                gateway_log("short read from new client %s, aborting for now\n", conn->addr_str);
-                return;
-            }
-            nbytes = evbuffer_remove(input, data, min_length); //remove maximum size of first line
-            gateway_log("removed %d from buffer of length %lu\n", nbytes, input_length);
-            int magicBytes = memcmp(data, MAGIC_BYTES, MAGIC_BYTES_SIZE);
-            if (magicBytes != 0) {
-                fprintf(stderr, "new client %s handshake failed 0x143\n", conn->addr_str);
-                closeClient(conn);
-                return;
-            }
-            if (memcmp(&data[MAGIC_BYTES_SIZE], SESSION_TYPE_CLIENT, SESSION_TYPE_SIZE) == 0) {
-                gateway_log("%s indicated a client session type\n", conn->addr_str);
-                conn->type = gateway_client;
-            } else if (memcmp(&data[MAGIC_BYTES_SIZE], SESSION_TYPE_SERVER, SESSION_TYPE_SIZE) == 0) {
-                gateway_log("%s indicated a server session type\n", conn->addr_str);
-                conn->type = gateway_server;
-            } else {
-                fprintf(stderr, "new client %s handshake failed 0x322\n", conn->addr_str);
-                closeClient(conn);
-                return;
-            }
-        }
+    if (!has_active_session(conn)) {
+        gateway_log("%s does not have an active session\n", conn->addr_str);
         if (conn->type == gateway_client) {
-            input_length = evbuffer_get_length(input);
-            if (input_length < SESSION_KEY_SIZE) {
-                gateway_log("short read from client session %s, aborting for now\n", conn->addr_str);
+            res = read_session_key(conn);
+            if (res == READ_RESULT_SHORT_READ)
+                return;
+            if (res == READ_RESULT_ERROR) {
+                closeClient(conn);
                 return;
             }
-            evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE);
         } else if (conn->type == gateway_server) {
-            gateway_log("sending session key response to new server %s\n", conn->addr_str);
-            gen_session_key(conn->session_key, SESSION_KEY_SIZE);
-            unsigned char response[SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE];
-            memcpy(response, SESSION_OK_RESPONSE, SESSION_OK_RESPONSE_SIZE);
-            memcpy(&response[SESSION_OK_RESPONSE_SIZE], conn->session_key, SESSION_KEY_SIZE);
-            evbuffer_add(output, response, SESSION_OK_RESPONSE_SIZE + SESSION_KEY_SIZE);
-        } else {
-            memcpy(conn->session_key, EMPTY_SESSION, SESSION_KEY_SIZE);
-            return;
+            unsigned char new_session_key[SESSION_KEY_SIZE];
+            gen_session_key(new_session_key, SESSION_KEY_SIZE);
+            res = send_session_key_response(conn, new_session_key);
+            if (res == WRITE_RESULT_ERROR) {
+                closeClient(conn);
+                return;
+            }
+            memcpy(conn->session_key, new_session_key, SESSION_KEY_SIZE);
         }
     }
 
     int new_result = 0;
-
     if (conn->type == gateway_client) {
         new_result = add_client(conn);
     } else if (conn->type == gateway_server) {
         new_result = add_server(conn);
     } else {
+        gateway_log("Unknown connection type\n");
+        closeClient(conn);
         return;
     }
 
@@ -509,8 +499,13 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         printConnections();
 
     char session_key_str[(SESSION_KEY_SIZE * 2) + 1];
-    get_session_key_str(conn->session_key, session_key_str);
+    get_session_key_str(session_key_str, conn->session_key);
     gateway_log("%s has session key %s\n", conn->addr_str, session_key_str);
+
+    res = process_gateway_read(conn);
+    if (res == READ_RESULT_SHORT_READ) {
+        return;
+    }
 
     while ((input_length = evbuffer_get_length(input)) > 0) {
         gateway_log("%lu left in buffer from %s...\n", input_length, conn->addr_str);
@@ -589,8 +584,8 @@ static void readcb(struct bufferevent *bev, void *ctx) {
             if (message->length == conn->current_message_sent) {
                 gateway_log("message finished from %d\n", message->from);
                 conn->current_message_sent = 0;
-                conn->current_message = NULL;
                 free(conn->current_message);
+                conn->current_message = NULL;
             }
         } else {
             peer = get_server_connection(conn->session_key);

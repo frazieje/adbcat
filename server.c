@@ -196,7 +196,7 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
         }
         memcpy(gw_ctx->session_key, &data[SESSION_OK_RESPONSE_SIZE], SESSION_KEY_SIZE);
         char session_key_str[SESSION_KEY_SIZE * 2 + 1];
-        get_session_key_str(gw_ctx->session_key, session_key_str);
+        get_session_key_str(session_key_str, gw_ctx->session_key);
         printf("local adb server shared via adbcat at %s\n", session_key_str);
     }
     server_log("read %lu from gateway...\n", len);

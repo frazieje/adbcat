@@ -12,8 +12,7 @@
 #include <netdb.h>
 
 void gen_session_key(unsigned char *target, int length) {
-    int i;
-    for (i = 0; i < length; i++)
+    for (int i = 0; i < length; i++)
     {
 #ifdef __linux__
         target[i] = arc4random();
@@ -29,7 +28,7 @@ void gen_session_key(unsigned char *target, int length) {
     }
 }
 
-void get_session_key_str(unsigned char *session_key, char *target) {
+void get_session_key_str(char *target, const unsigned char *session_key) {
     for (int i = 0; i < SESSION_KEY_SIZE; i++) {
         sprintf(&target[i*2], "%02x", (unsigned int)session_key[i]);
     }
