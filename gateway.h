@@ -5,7 +5,8 @@
 enum gateway_message_type { gw_msg_forward, gw_msg_close };
 
 typedef struct gateway_message_t {
-    enum gateway_message_type type; //
+    enum gateway_message_type type;
+    int requires_preamble;
     uint32_t from;
     uint64_t length;
 } gateway_message_t;

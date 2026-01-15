@@ -19,8 +19,10 @@
 #define READ_RESULT_OK 1
 #define READ_RESULT_ERROR (-1)
 
-#define WRITE_RESULT_OK 1
-#define WRITE_RESULT_ERROR (-1)
+#define WRITE_RESULT_OK 2
+#define WRITE_RESULT_ERROR (-2)
+#define WRITE_RESULT_PEER_MISSING 3
+#define WRITE_RESULT_CLOSE 4
 
 #define LL_ADD(item, list) { \
     item->prev = NULL; \
@@ -154,14 +156,14 @@ static int add_client(gateway_connection_t *client) {
             curr = curr->next;
         }
         if (dupe == NULL) {
-            gateway_log("adding new client to ll%s\n", client->addr_str);
+            gateway_log("adding new client to ll %s\n", client->addr_str);
             LL_ADD(client, existing_clients)
             gateway_connection_ref_t ref = { .value = existing_clients };
             ht_insert(&gateway_clients, client->session_key, &ref);
             return 1;
         }
     } else {
-        gateway_log("adding new client to ht%s\n", client->addr_str);
+        gateway_log("adding new client to ht %s\n", client->addr_str);
         gateway_connection_ref_t ref = { .value = client };
         ht_insert(&gateway_clients, client->session_key, &ref);
         return 1;
@@ -271,11 +273,11 @@ static void closeClientOnFinished(gateway_connection_t *conn) {
     }
 }
 
-static gateway_connection_t *get_server_connection(unsigned char *session_key) {
+static gateway_connection_t *get_server_connection(const unsigned char *session_key) {
     if (memcmp(session_key, EMPTY_SESSION, SESSION_KEY_SIZE) == 0) {
         return NULL;
     }
-    gateway_connection_ref_t *result = (gateway_connection_ref_t *)ht_lookup(&gateway_servers, session_key);
+    const gateway_connection_ref_t *result = ht_lookup(&gateway_servers, (unsigned char *)session_key);
     if (result != NULL) {
         return result->value;
     } else {
@@ -283,11 +285,11 @@ static gateway_connection_t *get_server_connection(unsigned char *session_key) {
     }
 }
 
-static gateway_connection_t *get_client_connection(unsigned char *session_key, uint32_t from) {
+static gateway_connection_t *get_client_connection(const unsigned char *session_key, uint32_t from) {
     if (memcmp(session_key, EMPTY_SESSION, SESSION_KEY_SIZE) == 0) {
         return NULL;
     }
-    gateway_connection_ref_t *existing_clients_ref = ht_lookup( &gateway_clients,session_key);
+    const gateway_connection_ref_t *existing_clients_ref = ht_lookup(&gateway_clients, (unsigned char *)session_key);
     gateway_connection_t *existing_clients = NULL;
     if (existing_clients_ref != NULL) {
         existing_clients = existing_clients_ref->value;
@@ -303,6 +305,15 @@ static gateway_connection_t *get_client_connection(unsigned char *session_key, u
         }
     }
     return NULL;
+}
+
+static gateway_connection_t *get_peer(const gateway_connection_t *conn) {
+    gateway_connection_t *peer = NULL;
+    if (conn->type == gateway_server)
+        peer = get_client_connection(conn->session_key, conn->current_message->from);
+    if (conn->type == gateway_client)
+        peer = get_server_connection(conn->session_key);
+    return peer;
 }
 
 static void printConnection(gateway_connection_t *conn) {
@@ -359,7 +370,7 @@ static int has_active_session(gateway_connection_t *conn) {
 
 static int read_conn_type(gateway_connection_t *conn) {
     const int min_length = MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE;
-    char data[min_length];
+    char data[MAGIC_BYTES_SIZE + SESSION_TYPE_SIZE];
     if (conn->type != unknown) {
         return READ_RESULT_OK;
     }
@@ -396,7 +407,9 @@ static int read_session_key(gateway_connection_t *conn) {
         gateway_log("short read from client session %s, aborting for now\n", conn->addr_str);
         return READ_RESULT_SHORT_READ;
     }
-    if (evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE) == SESSION_KEY_SIZE) {
+    int nbytes = evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE);
+    if (nbytes == SESSION_KEY_SIZE) {
+        gateway_log("removed %d from buffer of length %lu\n", nbytes, input_length);
         return READ_RESULT_OK;
     }
     return READ_RESULT_ERROR;
@@ -413,19 +426,147 @@ static int send_session_key_response(const gateway_connection_t *conn, const uns
     return WRITE_RESULT_ERROR;
 }
 
-static int process_gateway_read(gateway_connection_t *conn) {
+static int process_server_read(gateway_connection_t *conn) {
+    const gateway_message_t *message = conn->current_message;
+    const struct evbuffer *input = bufferevent_get_input(conn->bev);
+    const size_t input_length = evbuffer_get_length(input);
+    if (message == NULL) {
+        gateway_log("read new server message from %s\n", conn->addr_str);
+        int min_msg_length = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
+        if (input_length < min_msg_length) {
+            gateway_log("not enough data to read server message from %s, aborting for now\n", conn->addr_str);
+            return READ_RESULT_SHORT_READ;
+        }
+        char msg_type[SERVER_MSG_TYPE_SIZE + 1];
+        evbuffer_remove((struct evbuffer *)input, msg_type, SERVER_MSG_TYPE_SIZE);
+        msg_type[SERVER_MSG_TYPE_SIZE] = '\0';
+        gateway_message_t *new_message;
+        if (strncmp(msg_type, SERVER_CLOSE_MSG, SERVER_MSG_TYPE_SIZE) == 0) {
+            new_message = malloc(sizeof(gateway_message_t));
+            memset(new_message, 0, sizeof(gateway_message_t));
+            new_message->type = gw_msg_close;
+            evbuffer_remove((struct evbuffer *)input, &new_message->from, SERVER_MSG_FROM_SIZE);
+            evbuffer_remove((struct evbuffer *)input, &new_message->length, SERVER_FWD_LENGTH_SIZE);
+            gateway_log("message from server %s is a close message for client %d with length %lu\n", conn->addr_str, new_message->from, new_message->length);
+        } else if (strncmp(msg_type, SERVER_FWD_MSG, SERVER_MSG_TYPE_SIZE) == 0) {
+            new_message = malloc(sizeof(gateway_message_t));
+            memset(new_message, 0, sizeof(gateway_message_t));
+            new_message->type = gw_msg_forward;
+            evbuffer_remove((struct evbuffer *)input, &new_message->from, SERVER_MSG_FROM_SIZE);
+            evbuffer_remove((struct evbuffer *)input, &new_message->length, SERVER_FWD_LENGTH_SIZE);
+            gateway_log("message from server %s is a fward message for client %d, with length %lu\n", conn->addr_str, new_message->from,
+                   new_message->length);
+        } else {
+            gateway_log("message is unrecognized, error\n");
+            return READ_RESULT_ERROR;
+        }
+        conn->current_message = new_message;
+        conn->current_message_sent = 0;
+    }
+    return READ_RESULT_OK;
+}
+
+static int process_client_read(gateway_connection_t *conn) {
+    const size_t input_length = evbuffer_get_length(bufferevent_get_input(conn->bev));
+    uint32_t bevfd = bufferevent_getfd(conn->bev);
+    if (conn->current_message == NULL) {
+        gateway_message_t *new_message = malloc(sizeof(gateway_message_t));
+        memset(new_message, 0, sizeof(gateway_message_t));
+        new_message->type = gw_msg_forward;
+        new_message->requires_preamble = 1;
+        memcpy(&new_message->from, &bevfd, SERVER_MSG_FROM_SIZE);
+        memcpy(&new_message->length, &input_length, SERVER_FWD_LENGTH_SIZE);
+        conn->current_message = new_message;
+        conn->current_message_sent = 0;
+    }
+    return READ_RESULT_OK;
+}
+
+static int process_gateway_message(gateway_connection_t *conn, gateway_connection_t **peer_out) {
+    const struct evbuffer *input = bufferevent_get_input(conn->bev);
+    const gateway_message_t *message = conn->current_message;
+    if (message == NULL)
+        return WRITE_RESULT_OK;
+    gateway_connection_t *peer = get_peer(conn);
+    *peer_out = peer;
+    if (peer == NULL) {
+        gateway_log("peer not found for client %s", conn->addr_str);
+        size_t input_length = evbuffer_get_length(input);
+        if (input_length <= MAX_INPUT_BUFFER_SIZE) {
+            gateway_log(", aborting for now \n");
+            return WRITE_RESULT_PEER_MISSING;
+        }
+        // drain the buffer since the peer is missing
+        evbuffer_drain((struct evbuffer *)input, input_length);
+        if (conn->type == gateway_client) {
+            gateway_log(", drained and closing %s\n", conn->addr_str);
+            return WRITE_RESULT_ERROR;
+        }
+        gateway_log(", drained %s\n", conn->addr_str);
+        return WRITE_RESULT_OK;
+    }
+    if (message->type == gw_msg_close) {
+        conn->current_message_sent = 0;
+        free(conn->current_message);
+        conn->current_message = NULL;
+        return WRITE_RESULT_CLOSE;
+    }
+    struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
+    if (message->requires_preamble) {
+        gateway_log("message from %s to %s requires preamble, adding\n", conn->addr_str, peer->addr_str);
+        int server_fwd_preamble_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
+        unsigned char preamble[server_fwd_preamble_size];
+        memcpy(preamble, SERVER_FWD_MSG, SERVER_MSG_TYPE_SIZE);
+        memcpy(&preamble[SERVER_MSG_TYPE_SIZE], &message->from, SERVER_MSG_FROM_SIZE);
+        memcpy(&preamble[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], &message->length,
+               SERVER_FWD_LENGTH_SIZE);
+        evbuffer_add(peer_output, preamble, server_fwd_preamble_size);
+    }
+    uint64_t remaining = message->length - conn->current_message_sent;
+    char remaining_data[remaining];
+    int msg_nbytes = evbuffer_remove((struct evbuffer *)input, remaining_data, remaining);
+    evbuffer_add(peer_output, remaining_data, msg_nbytes);
+    conn->current_message_sent += msg_nbytes;
+    gateway_log("wrote %d bytes (%d total) of %d from fd %d\n", msg_nbytes, conn->current_message_sent, message->length, message->from);
+    if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
+        gateway_log("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
+        bufferevent_setcb(peer->bev, readcb, drained_writecb,
+                          eventcb, peer);
+        bufferevent_setwatermark(peer->bev, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE / 2,
+                                 MAX_OUTPUT_BUFFER_SIZE);
+        bufferevent_disable(conn->bev, EV_READ);
+    }
+    if (message->length == conn->current_message_sent) {
+        gateway_log("message finished from %d\n", message->from);
+        conn->current_message_sent = 0;
+        free(conn->current_message);
+        conn->current_message = NULL;
+    }
+    return WRITE_RESULT_OK;
+}
+
+static int process_gateway_frame(gateway_connection_t *conn, gateway_connection_t **peer_out) {
     struct evbuffer *input = bufferevent_get_input(conn->bev);
-    size_t input_length = evbuffer_get_length(input);
+    size_t input_length;
+    int res;
     while ((input_length = evbuffer_get_length(input)) > 0) {
         gateway_log("%lu left in buffer from %s...\n", input_length, conn->addr_str);
         if (conn->type == gateway_server) {
-            process_server_read(conn);
+            res = process_server_read(conn);
         } else if (conn->type == gateway_client) {
-            process_client_read(conn);
+            res = process_client_read(conn);
         } else {
             return READ_RESULT_ERROR;
         }
+        if (res != READ_RESULT_OK) {
+            return res;
+        }
+        res = process_gateway_message(conn, peer_out);
+        if (res != WRITE_RESULT_OK) {
+            return res;
+        }
     }
+    gateway_log("no bytes left to handle for %s\n", conn->addr_str);
     return READ_RESULT_OK;
 }
 
@@ -445,9 +586,6 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     //         return;
     //     }
     // }
-
-    struct evbuffer *input = bufferevent_get_input(bev);
-    struct evbuffer *output = bufferevent_get_output(bev);
 
     int res;
 
@@ -502,130 +640,16 @@ static void readcb(struct bufferevent *bev, void *ctx) {
     get_session_key_str(session_key_str, conn->session_key);
     gateway_log("%s has session key %s\n", conn->addr_str, session_key_str);
 
-    res = process_gateway_read(conn);
+    gateway_connection_t *peer = NULL;
+    res = process_gateway_frame(conn, &peer);
     if (res == READ_RESULT_SHORT_READ) {
-        return;
+        gateway_log("Short read returned from process_gateway_frame, abort for now\n");
+    } else if (res == READ_RESULT_ERROR || res == WRITE_RESULT_ERROR) {
+        closeClient(conn);
+    } else if (res == WRITE_RESULT_CLOSE) {
+        if (peer)
+            closeClientOnFinished(peer);
     }
-
-    while ((input_length = evbuffer_get_length(input)) > 0) {
-        gateway_log("%lu left in buffer from %s...\n", input_length, conn->addr_str);
-        gateway_connection_t *peer = NULL;
-        if (conn->type == gateway_server) {
-            gateway_message_t *message = conn->current_message;
-            if (message == NULL) {
-                gateway_log("read new server message from %s\n", conn->addr_str);
-                int min_msg_length = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
-                if (input_length < min_msg_length) {
-                    gateway_log("not enough data to read server message from %s, aborting for now\n", conn->addr_str);
-                    return;
-                }
-                char msg_type[SERVER_MSG_TYPE_SIZE + 1];
-                evbuffer_remove(input, msg_type, SERVER_MSG_TYPE_SIZE);
-                msg_type[SERVER_MSG_TYPE_SIZE] = '\0';
-                if (strcmp(msg_type, SERVER_CLOSE_MSG) == 0) {
-                    gateway_log("message from server %s is a close message\n", conn->addr_str);
-                    uint32_t from;
-                    evbuffer_remove(input, &from, SERVER_MSG_FROM_SIZE);
-                    evbuffer_drain(input, SERVER_FWD_LENGTH_SIZE);
-                    peer = get_client_connection(conn->session_key, from);
-                    gateway_log("process close message from server %s for client %d\n", conn->addr_str, from);
-                    if (peer != NULL) {
-                        gateway_log("client %d has active connection %s, closing\n", from, peer->addr_str);
-                        closeClientOnFinished(peer);
-                    } else {
-                        gateway_log("no active connection found for client %d on server %s\n", from, conn->addr_str);
-                    }
-                } else if (strcmp(msg_type, SERVER_FWD_MSG) == 0) {
-                    gateway_message_t *new_message = malloc(sizeof(gateway_message_t));
-                    memset(new_message, 0, sizeof(gateway_message_t));
-                    new_message->type = gw_msg_forward;
-                    evbuffer_remove(input, &new_message->from, SERVER_MSG_FROM_SIZE);
-                    evbuffer_remove(input, &new_message->length, SERVER_FWD_LENGTH_SIZE);
-                    gateway_log("message from server %s is a fward message for client %d, with length %lu\n", conn->addr_str, new_message->from,
-                           new_message->length);
-                    conn->current_message = new_message;
-                    conn->current_message_sent = 0;
-                } else {
-                    gateway_log("message is unrecognized, error\n");
-                    closeClient(conn);
-                    return;
-                }
-                continue;
-            }
-            uint64_t remaining = message->length - conn->current_message_sent;
-            gateway_log("message from server %s to client %d with %lu remaining...\n", conn->addr_str, message->from, remaining);
-            peer = get_client_connection(conn->session_key, conn->current_message->from);
-            if (peer != NULL) {
-                gateway_log("client peer %s found for %s, forwarding\n", peer->addr_str, conn->addr_str);
-                struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
-                char remaining_data[remaining];
-                int msg_nbytes = evbuffer_remove(input, remaining_data, remaining);
-                evbuffer_add(peer_output, remaining_data, msg_nbytes);
-                conn->current_message_sent += msg_nbytes;
-                gateway_log("wrote %d bytes to client %d\n", msg_nbytes, message->from);
-                if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
-                    gateway_log("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
-                    bufferevent_setcb(peer->bev, readcb, drained_writecb,
-                                      eventcb, peer);
-                    bufferevent_setwatermark(peer->bev, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE / 2,
-                                             MAX_OUTPUT_BUFFER_SIZE);
-                    bufferevent_disable(bev, EV_READ);
-                }
-            } else {
-                gateway_log("peer not found for client %s", conn->addr_str);
-                if (input_length <= MAX_INPUT_BUFFER_SIZE) {
-                    gateway_log(", aborting for now \n");
-                    return;
-                }
-                //for servers, we're going to just drain the buffer
-                gateway_log(", draining\n");
-                evbuffer_drain(input, input_length);
-            }
-            if (message->length == conn->current_message_sent) {
-                gateway_log("message finished from %d\n", message->from);
-                conn->current_message_sent = 0;
-                free(conn->current_message);
-                conn->current_message = NULL;
-            }
-        } else {
-            peer = get_server_connection(conn->session_key);
-            if (peer != NULL) {
-                gateway_log("server peer %s found for %s, forwarding with preamble\n", peer->addr_str, conn->addr_str);
-                struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
-                uint32_t bevfd = bufferevent_getfd(conn->bev);
-                int server_fwd_preamble_size = SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE + SERVER_FWD_LENGTH_SIZE;
-                unsigned char preamble[server_fwd_preamble_size];
-                memcpy(preamble, SERVER_FWD_MSG, SERVER_MSG_TYPE_SIZE);
-                memcpy(&preamble[SERVER_MSG_TYPE_SIZE], &bevfd, SERVER_MSG_FROM_SIZE);
-                memcpy(&preamble[SERVER_MSG_TYPE_SIZE + SERVER_MSG_FROM_SIZE], &input_length,
-                       SERVER_FWD_LENGTH_SIZE);
-                evbuffer_add(peer_output, preamble, server_fwd_preamble_size);
-                evbuffer_add_buffer(peer_output, input);
-                size_t total_bytes_sent = server_fwd_preamble_size + input_length;
-                gateway_log("forwarded %lu bytes from client %s to server peer %s with from %d and length %lu, forwarding with preamble\n", total_bytes_sent, conn->addr_str, peer->addr_str, bevfd, input_length);
-                if (evbuffer_get_length(peer_output) >= MAX_OUTPUT_BUFFER_SIZE) {
-                    gateway_log("peer %s buffer full, disable %s until drained\n", peer->addr_str, conn->addr_str);
-                    bufferevent_setcb(peer->bev, readcb, drained_writecb,
-                                      eventcb, peer);
-                    bufferevent_setwatermark(peer->bev, EV_WRITE, MAX_OUTPUT_BUFFER_SIZE / 2,
-                                             MAX_OUTPUT_BUFFER_SIZE);
-                    bufferevent_disable(bev, EV_READ);
-                }
-            } else {
-                gateway_log("peer not found for client %s\n", conn->addr_str);
-                if (input_length <= MAX_INPUT_BUFFER_SIZE) {
-                    gateway_log(", aborting for now \n");
-                    return;
-                }
-                //for clients, we're going to disconnect them if their peer has gone MIA
-                gateway_log(", draining and disconnecting\n");
-                closeClient(conn);
-                evbuffer_drain(input, input_length);
-            }
-        }
-    }
-
-    gateway_log("no bytes left to handle for %s\n", conn->addr_str);
 }
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx) {
