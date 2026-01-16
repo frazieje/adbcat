@@ -188,7 +188,8 @@ static void close_on_finished_writecb(struct bufferevent *bev, void *ctx) {
 }
 
 static int drive_tls_shutdown(gateway_connection_t *conn) {
-    const int r = SSL_shutdown(bufferevent_openssl_get_ssl(conn->bev));
+    const SSL *ssl = bufferevent_openssl_get_ssl(conn->bev);
+    const int r = SSL_shutdown((SSL *)ssl);
     gateway_log("closing client %s ssl_shutdown returned %d\n", conn->addr_str, r);
     if (r == 1) {
         return 1;
@@ -200,7 +201,7 @@ static int drive_tls_shutdown(gateway_connection_t *conn) {
         return 0;
     }
 
-    int err = SSL_get_error(bufferevent_openssl_get_ssl(conn->bev), r);
+    const int err = SSL_get_error((SSL *)ssl, r);
     if (err == SSL_ERROR_WANT_READ) {
         gateway_log("closing client %s ssl error want read\n", conn->addr_str);
         bufferevent_enable(conn->bev, EV_READ);
@@ -595,8 +596,7 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         if (res == READ_RESULT_SHORT_READ)
             return;
         if (res == READ_RESULT_ERROR) {
-            closeClient(conn);
-            return;
+            goto close;
         }
     }
 
@@ -650,6 +650,19 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         if (peer)
             closeClientOnFinished(peer);
     }
+    return;
+
+    close:
+        conn->closing = 1;
+        if (!gw_settings.cleartext_enabled) {
+            const int done = drive_tls_shutdown(conn);
+            printf("read tls shutdown returned %d\n", done);
+            if (done == 1 || done == -1) {
+                closeClient(conn);
+            }
+        } else {
+            closeClient(conn);
+        }
 }
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx) {
@@ -696,6 +709,19 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
             }
         } else {
             bufferevent_free(bev);
+        }
+    }
+}
+
+static void writecb(struct bufferevent *bev, void *ctx) {
+    gateway_connection_t *conn = ctx;
+    if (!gw_settings.cleartext_enabled) {
+        if (evbuffer_get_length(bufferevent_get_output(bev)) == 0 && conn->closing) {
+            int done = drive_tls_shutdown(conn);
+            printf("write tls shutdown returned %d\n", done);
+            if (done == 1 || done == -1) {
+                closeClient(conn);
+            }
         }
     }
 }
@@ -783,7 +809,7 @@ static void accept_conn_cb(
 
     gateway_log("Got new connection from %s\n", conn->addr_str);
 
-    bufferevent_setcb(bev, readcb, NULL, eventcb, conn);
+    bufferevent_setcb(bev, readcb, writecb, eventcb, conn);
     bufferevent_enable(bev, EV_READ | EV_WRITE);
 }
 
