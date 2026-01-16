@@ -11,7 +11,7 @@
 #include "server.h"
 
 int main(int argc, char **argv) {
-    printf("Starting adbcat v0.2\n");
+    printf("Starting adbcat v0.3\n");
     struct addrinfo hints;
     struct addrinfo *res_list, *res;
     gateway_config_t gw_config;

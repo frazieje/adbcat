@@ -1,7 +1,6 @@
 #include "gateway.h"
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
 #include <unistd.h>
 #include <netinet/in.h>
 #include "adbcat.h"
@@ -22,7 +21,7 @@
 #define WRITE_RESULT_OK 2
 #define WRITE_RESULT_ERROR (-2)
 #define WRITE_RESULT_PEER_MISSING 3
-#define WRITE_RESULT_CLOSE 4
+#define WRITE_RESULT_SHUTDOWN 4
 
 #define LL_ADD(item, list) { \
     item->prev = NULL; \
@@ -177,20 +176,23 @@ static void drained_writecb(struct bufferevent *bev, void *ctx);
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx);
 
-static void close_on_finished_writecb(struct bufferevent *bev, void *ctx) {
-    struct evbuffer *b = bufferevent_get_output(bev);
-    gateway_connection_t *conn = ctx;
-    if (evbuffer_get_length(b) == 0) {
-        gateway_log("writing finished, closing client %s now\n", conn->addr_str);
-        bufferevent_free(bev);
-        free(conn);
+static int closeClient(gateway_connection_t *conn) {
+    gateway_log("closing client %s\n", conn->addr_str);
+    int result = 0;
+    if (conn->type == gateway_client) {
+        result = remove_client(conn);
+    } else if (conn->type == gateway_server) {
+        result = remove_server(conn);
     }
+    bufferevent_free(conn->bev);
+    evutil_closesocket(bufferevent_getfd(conn->bev));
+    free(conn);
+    return result;
 }
 
 static int drive_tls_shutdown(gateway_connection_t *conn) {
     const SSL *ssl = bufferevent_openssl_get_ssl(conn->bev);
     const int r = SSL_shutdown((SSL *)ssl);
-    gateway_log("closing client %s ssl_shutdown returned %d\n", conn->addr_str, r);
     if (r == 1) {
         return 1;
     }
@@ -217,57 +219,41 @@ static int drive_tls_shutdown(gateway_connection_t *conn) {
     return -1;
 }
 
-static int closeClient(gateway_connection_t *conn) {
-    gateway_log("closing client %s\n", conn->addr_str);
-    int result = 0;
-    conn->closing = 1;
 
-    // if (!gw_settings.cleartext_enabled) {
-    //     int r = drive_tls_shutdown(conn);
-    //     if (r != -1 && r != 1) {
-    //         return 0;
-    //     }
-    // }
-
-    if (conn->type == gateway_client) {
-        result = remove_client(conn);
-    } else if (conn->type == gateway_server) {
-        result = remove_server(conn);
+static void close_on_finished_writecb(struct bufferevent *bev, void *ctx) {
+    struct evbuffer *b = bufferevent_get_output(bev);
+    gateway_connection_t *conn = ctx;
+    if (evbuffer_get_length(b) == 0) {
+        gateway_log("writing finished, closing client %s now\n", conn->addr_str);
+        if (!gw_settings.cleartext_enabled) {
+            const int done = drive_tls_shutdown(conn);
+            printf("read tls shutdown returned %d\n", done);
+            if (done == 1 || done == -1) {
+                bufferevent_free(bev);
+                free(conn);
+            }
+        } else {
+            bufferevent_free(bev);
+            free(conn);
+        }
     }
-    bufferevent_free(conn->bev);
-    evutil_closesocket(bufferevent_getfd(conn->bev));
-    free(conn);
-    return result;
 }
+
 
 static void closeClientOnFinished(gateway_connection_t *conn) {
     gateway_log("closing client %s on finished\n", conn->addr_str);
-    if (evbuffer_get_length(
-            bufferevent_get_output(conn->bev)) > 0) {
-        if (conn->type == gateway_client) {
-            remove_client(conn);
-        } else if (conn->type == gateway_server) {
-            remove_server(conn);
-        }
+    if (conn->type == gateway_client) {
+        remove_client(conn);
+    } else if (conn->type == gateway_server) {
+        remove_server(conn);
+    }
+    if (evbuffer_get_length(bufferevent_get_output(conn->bev)) > 0) {
         gateway_log("closing client %s on finished write\n", conn->addr_str);
         bufferevent_setcb(conn->bev,
                           NULL, close_on_finished_writecb,
                           eventcb, conn);
         bufferevent_disable(conn->bev, EV_READ);
     } else {
-        // gateway_log("closing client %s now\n", conn->addr_str);
-        // gateway_log("sending shutdown to client %s\n", conn->addr_str);
-        // if (!gw_settings.cleartext_enabled) {
-        //     int r = drive_tls_shutdown(conn);
-        //     if (r != -1 && r != 1) {
-        //         return;
-        //     }
-        // }
-        if (conn->type == gateway_client) {
-            remove_client(conn);
-        } else if (conn->type == gateway_server) {
-            remove_server(conn);
-        }
         printf("closing client %s freeing resources\n", conn->addr_str);
         bufferevent_free(conn->bev);
         free(conn);
@@ -297,7 +283,6 @@ static gateway_connection_t *get_client_connection(const unsigned char *session_
     }
     if (existing_clients != NULL) {
         gateway_connection_t *curr = existing_clients;
-        gateway_connection_t *dupe = NULL;
         while (curr != NULL) {
             if (from == bufferevent_getfd(curr->bev)) {
                 return curr;
@@ -411,7 +396,9 @@ static int read_session_key(gateway_connection_t *conn) {
     int nbytes = evbuffer_remove(input, conn->session_key, SESSION_KEY_SIZE);
     if (nbytes == SESSION_KEY_SIZE) {
         gateway_log("removed %d from buffer of length %lu\n", nbytes, input_length);
-        return READ_RESULT_OK;
+        if (memcmp(EMPTY_SESSION, conn->session_key, SESSION_KEY_SIZE) != 0) {
+            return READ_RESULT_OK;
+        }
     }
     return READ_RESULT_ERROR;
 }
@@ -510,7 +497,7 @@ static int process_gateway_message(gateway_connection_t *conn, gateway_connectio
         conn->current_message_sent = 0;
         free(conn->current_message);
         conn->current_message = NULL;
-        return WRITE_RESULT_CLOSE;
+        return WRITE_RESULT_SHUTDOWN;
     }
     struct evbuffer *peer_output = bufferevent_get_output(peer->bev);
     if (message->requires_preamble) {
@@ -572,88 +559,79 @@ static int process_gateway_frame(gateway_connection_t *conn, gateway_connection_
 }
 
 static void readcb(struct bufferevent *bev, void *ctx) {
+    int res;
     gateway_connection_t *conn = ctx;
-
-    if (conn == NULL)  {
-        return;
-    }
-
     gateway_log("read bytes from %s\n", conn->addr_str);
 
-    // if (!gw_settings.cleartext_enabled) {
-    //     if (conn->closing) {
-    //         gateway_log("conn %s is closing, calling closeClient\n", conn->addr_str);
-    //         closeClient(conn);
-    //         return;
-    //     }
-    // }
-
-    int res;
-
-    if (!has_conn_type(conn)) {
-        gateway_log("%s does not have a connection type\n", conn->addr_str);
-        res = read_conn_type(conn);
-        if (res == READ_RESULT_SHORT_READ)
-            return;
-        if (res == READ_RESULT_ERROR) {
-            goto close;
-        }
-    }
-
-    if (!has_active_session(conn)) {
-        gateway_log("%s does not have an active session\n", conn->addr_str);
-        if (conn->type == gateway_client) {
-            res = read_session_key(conn);
+    while (!conn->closing) {
+        if (!has_conn_type(conn)) {
+            gateway_log("%s does not have a connection type\n", conn->addr_str);
+            res = read_conn_type(conn);
             if (res == READ_RESULT_SHORT_READ)
                 return;
             if (res == READ_RESULT_ERROR) {
-                closeClient(conn);
-                return;
+                conn->closing = 1;
+                break;
             }
-        } else if (conn->type == gateway_server) {
-            unsigned char new_session_key[SESSION_KEY_SIZE];
-            gen_session_key(new_session_key, SESSION_KEY_SIZE);
-            res = send_session_key_response(conn, new_session_key);
-            if (res == WRITE_RESULT_ERROR) {
-                closeClient(conn);
-                return;
-            }
-            memcpy(conn->session_key, new_session_key, SESSION_KEY_SIZE);
         }
-    }
 
-    int new_result = 0;
-    if (conn->type == gateway_client) {
-        new_result = add_client(conn);
-    } else if (conn->type == gateway_server) {
-        new_result = add_server(conn);
-    } else {
-        gateway_log("Unknown connection type\n");
-        closeClient(conn);
+        if (!has_active_session(conn)) {
+            gateway_log("%s does not have an active session\n", conn->addr_str);
+            if (conn->type == gateway_client) {
+                res = read_session_key(conn);
+                if (res == READ_RESULT_SHORT_READ)
+                    return;
+                if (res == READ_RESULT_ERROR) {
+                    conn->closing = 1;
+                    break;
+                }
+            } else if (conn->type == gateway_server) {
+                unsigned char new_session_key[SESSION_KEY_SIZE];
+                gen_session_key(new_session_key, SESSION_KEY_SIZE);
+                res = send_session_key_response(conn, new_session_key);
+                if (res == WRITE_RESULT_ERROR) {
+                    conn->closing = 1;
+                    break;
+                }
+                memcpy(conn->session_key, new_session_key, SESSION_KEY_SIZE);
+            }
+        }
+
+        int new_result = 0;
+        if (conn->type == gateway_client) {
+            new_result = add_client(conn);
+        } else if (conn->type == gateway_server) {
+            new_result = add_server(conn);
+        } else {
+            gateway_log("Unknown connection type\n");
+            conn->closing = 1;
+            break;
+        }
+
+        if (new_result)
+            printConnections();
+
+        char session_key_str[(SESSION_KEY_SIZE * 2) + 1];
+        get_session_key_str(session_key_str, conn->session_key);
+        gateway_log("%s has session key %s\n", conn->addr_str, session_key_str);
+
+        gateway_connection_t *peer = NULL;
+        res = process_gateway_frame(conn, &peer);
+        if (res == READ_RESULT_SHORT_READ) {
+            gateway_log("Short read returned from process_gateway_frame, abort for now\n");
+        } else if (res == READ_RESULT_ERROR || res == WRITE_RESULT_ERROR) {
+            conn->closing = 1;
+            break;
+        } else if (res == WRITE_RESULT_SHUTDOWN) {
+            if (peer) {
+                peer->closing = 1;
+                closeClientOnFinished(peer);
+            }
+        }
         return;
     }
 
-    if (new_result)
-        printConnections();
-
-    char session_key_str[(SESSION_KEY_SIZE * 2) + 1];
-    get_session_key_str(session_key_str, conn->session_key);
-    gateway_log("%s has session key %s\n", conn->addr_str, session_key_str);
-
-    gateway_connection_t *peer = NULL;
-    res = process_gateway_frame(conn, &peer);
-    if (res == READ_RESULT_SHORT_READ) {
-        gateway_log("Short read returned from process_gateway_frame, abort for now\n");
-    } else if (res == READ_RESULT_ERROR || res == WRITE_RESULT_ERROR) {
-        closeClient(conn);
-    } else if (res == WRITE_RESULT_CLOSE) {
-        if (peer)
-            closeClientOnFinished(peer);
-    }
-    return;
-
-    close:
-        conn->closing = 1;
+    if (conn->closing) {
         if (!gw_settings.cleartext_enabled) {
             const int done = drive_tls_shutdown(conn);
             printf("read tls shutdown returned %d\n", done);
@@ -663,6 +641,7 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         } else {
             closeClient(conn);
         }
+    }
 }
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx) {
