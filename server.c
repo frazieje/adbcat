@@ -253,7 +253,7 @@ static void gateway_readcb(struct bufferevent *bev, void *ctx) {
             struct bufferevent *adb_server_bev = bufferevent_socket_new(base, -1,
                                                                         BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
             if (bufferevent_socket_connect(adb_server_bev,
-                                           (struct sockaddr *)gw_ctx->adbserver_addr, gw_ctx->adbserver_addr_len)<0) {
+                                           (struct sockaddr *)gw_ctx->adbserver_addr, (int)gw_ctx->adbserver_addr_len)<0) {
                 server_log("bufferevent_socket_connect");
                 bufferevent_free(adb_server_bev);
                 return;
@@ -421,14 +421,12 @@ int start_server(
         if (!gateway_bev)
             SSL_free(ssl);
 
-        bufferevent_openssl_set_allow_dirty_shutdown(gateway_bev, 1);
     } else {
         gateway_bev = bufferevent_socket_new(base, -1,
         BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
     }
 
-    if (bufferevent_socket_connect(gateway_bev,
-                                   (struct sockaddr *)gateway_addr, gateway_addr_len) < 0) {
+    if (bufferevent_socket_connect(gateway_bev, gateway_addr, (int)gateway_addr_len) < 0) {
         perror("bufferevent_socket_connect");
         bufferevent_free(gateway_bev);
         if (server_settings.ssl_ctx != NULL)

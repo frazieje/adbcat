@@ -20,8 +20,9 @@
 
 #define WRITE_RESULT_OK 2
 #define WRITE_RESULT_ERROR (-2)
-#define WRITE_RESULT_PEER_MISSING 3
 #define WRITE_RESULT_SHUTDOWN 4
+
+enum gateway_connection_state { active, closing_error, closing_by_peer };
 
 #define LL_ADD(item, list) { \
     item->prev = NULL; \
@@ -46,7 +47,7 @@ typedef struct gateway_connection_t {
     enum gateway_connection_mode type;
     gateway_message_t *current_message;
     uint64_t current_message_sent;
-    int closing;
+    enum gateway_connection_state state;
     struct gateway_connection_t *prev;
     struct gateway_connection_t *next;
 } gateway_connection_t;
@@ -482,9 +483,8 @@ static int process_gateway_message(gateway_connection_t *conn, gateway_connectio
         size_t input_length = evbuffer_get_length(input);
         if (input_length <= MAX_INPUT_BUFFER_SIZE) {
             gateway_log(", aborting for now \n");
-            return WRITE_RESULT_PEER_MISSING;
+            return WRITE_RESULT_OK;
         }
-        // drain the buffer since the peer is missing
         evbuffer_drain((struct evbuffer *)input, input_length);
         if (conn->type == gateway_client) {
             gateway_log(", drained and closing %s\n", conn->addr_str);
@@ -558,20 +558,54 @@ static int process_gateway_frame(gateway_connection_t *conn, gateway_connection_
     return READ_RESULT_OK;
 }
 
+static void closeClientError(gateway_connection_t *conn) {
+    if (conn->state != active)
+        return;
+    conn->state = closing_error;
+    struct timeval tv = { 10, 0 }; // e.g. 10s to drain/close
+    bufferevent_set_timeouts(conn->bev, &tv, &tv);
+}
+
+static void closeClientShutdown(gateway_connection_t *conn) {
+    if (conn->state != active)
+        return;
+    conn->state = closing_by_peer;
+    struct timeval tv = { 10, 0 }; // e.g. 10s to drain/close
+    bufferevent_set_timeouts(conn->bev, &tv, &tv);
+}
+
+static void check_client_state(gateway_connection_t *conn) {
+    if (conn->state == active) {
+        return;
+    }
+    if (evbuffer_get_length(bufferevent_get_output(conn->bev)) != 0) {
+        return;
+    }
+    if (!gw_settings.cleartext_enabled) {
+        int done = drive_tls_shutdown(conn);
+        printf("write tls shutdown returned %d\n", done);
+        if (done == 1 || done == -1) {
+            closeClient(conn);
+        }
+    } else {
+        closeClient(conn);
+    }
+}
+
 static void readcb(struct bufferevent *bev, void *ctx) {
     int res;
     gateway_connection_t *conn = ctx;
     gateway_log("read bytes from %s\n", conn->addr_str);
 
-    while (!conn->closing) {
+    if (conn->state == active) {
         if (!has_conn_type(conn)) {
             gateway_log("%s does not have a connection type\n", conn->addr_str);
             res = read_conn_type(conn);
             if (res == READ_RESULT_SHORT_READ)
                 return;
             if (res == READ_RESULT_ERROR) {
-                conn->closing = 1;
-                break;
+                closeClientError(conn);
+                return;
             }
         }
 
@@ -582,16 +616,16 @@ static void readcb(struct bufferevent *bev, void *ctx) {
                 if (res == READ_RESULT_SHORT_READ)
                     return;
                 if (res == READ_RESULT_ERROR) {
-                    conn->closing = 1;
-                    break;
+                    closeClientError(conn);
+                    return;
                 }
             } else if (conn->type == gateway_server) {
                 unsigned char new_session_key[SESSION_KEY_SIZE];
                 gen_session_key(new_session_key, SESSION_KEY_SIZE);
                 res = send_session_key_response(conn, new_session_key);
                 if (res == WRITE_RESULT_ERROR) {
-                    conn->closing = 1;
-                    break;
+                    closeClientError(conn);
+                    return;
                 }
                 memcpy(conn->session_key, new_session_key, SESSION_KEY_SIZE);
             }
@@ -604,8 +638,8 @@ static void readcb(struct bufferevent *bev, void *ctx) {
             new_result = add_server(conn);
         } else {
             gateway_log("Unknown connection type\n");
-            conn->closing = 1;
-            break;
+            closeClientError(conn);
+            return;
         }
 
         if (new_result)
@@ -617,31 +651,18 @@ static void readcb(struct bufferevent *bev, void *ctx) {
 
         gateway_connection_t *peer = NULL;
         res = process_gateway_frame(conn, &peer);
-        if (res == READ_RESULT_SHORT_READ) {
-            gateway_log("Short read returned from process_gateway_frame, abort for now\n");
-        } else if (res == READ_RESULT_ERROR || res == WRITE_RESULT_ERROR) {
-            conn->closing = 1;
-            break;
-        } else if (res == WRITE_RESULT_SHUTDOWN) {
-            if (peer) {
-                peer->closing = 1;
-                closeClientOnFinished(peer);
-            }
-        }
-        return;
-    }
 
-    if (conn->closing) {
-        if (!gw_settings.cleartext_enabled) {
-            const int done = drive_tls_shutdown(conn);
-            printf("read tls shutdown returned %d\n", done);
-            if (done == 1 || done == -1) {
-                closeClient(conn);
-            }
-        } else {
-            closeClient(conn);
+        if (res == WRITE_RESULT_SHUTDOWN && peer) {
+            closeClientShutdown(peer);
+        }
+
+        if (res == READ_RESULT_ERROR || res == WRITE_RESULT_ERROR) {
+            closeClientError(conn);
+        } else if (res == WRITE_RESULT_SHUTDOWN && peer) {
+            closeClientShutdown(peer);
         }
     }
+    check_client_state(conn);
 }
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx) {
@@ -649,7 +670,7 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
         if (errno)
             perror("Error from bufferevent");
     }
-    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) {
         gateway_connection_t *conn = ctx;
         if (ctx != NULL) {
             gateway_log("error callback for %s\n", conn->addr_str);
@@ -661,7 +682,7 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
             }
             if (conn->type == gateway_server) {
                 gateway_log("server %s disconnected\n", conn->addr_str);
-            } else if (conn->type == gateway_client) {
+            } else if (conn->type == gateway_client && conn->state != closing_by_peer) {
                 gateway_log("client %s disconnected\n", conn->addr_str);
                 gateway_connection_t *server_peer = get_server_connection(conn->session_key);
                 if (server_peer != NULL) {
@@ -692,17 +713,11 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx) {
     }
 }
 
+
+
 static void writecb(struct bufferevent *bev, void *ctx) {
     gateway_connection_t *conn = ctx;
-    if (!gw_settings.cleartext_enabled) {
-        if (evbuffer_get_length(bufferevent_get_output(bev)) == 0 && conn->closing) {
-            int done = drive_tls_shutdown(conn);
-            printf("write tls shutdown returned %d\n", done);
-            if (done == 1 || done == -1) {
-                closeClient(conn);
-            }
-        }
-    }
+    check_client_state(conn);
 }
 
 static void drained_writecb(struct bufferevent *bev, void *ctx) {
@@ -710,7 +725,7 @@ static void drained_writecb(struct bufferevent *bev, void *ctx) {
     gateway_log("conn %s buffer drained\n", conn->addr_str);
     /* this conn was choking the other side until output buffer drained.
      * Now it seems drained. */
-    bufferevent_setcb(bev, readcb, NULL, eventcb, ctx);
+    bufferevent_setcb(bev, readcb, writecb, eventcb, ctx);
     bufferevent_setwatermark(bev, EV_WRITE, 0, 0);
 
     if (conn->type == gateway_server) {
@@ -765,7 +780,6 @@ static void accept_conn_cb(
             return;
         }
 
-        bufferevent_openssl_set_allow_dirty_shutdown(bev, 1);
     } else {
         bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
         if (!bev) {
@@ -782,7 +796,7 @@ static void accept_conn_cb(
     address_to_str(address, socklen, conn->addr_str, ADDRESS_STRING_SIZE);
     conn->next = NULL;
     conn->prev = NULL;
-    conn->closing = 0;
+    conn->state = active;
     conn->current_message = NULL;
     conn->current_message_sent = 0;
 
