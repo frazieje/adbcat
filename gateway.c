@@ -575,6 +575,9 @@ static void closeClientShutdown(gateway_connection_t *conn) {
 }
 
 static void check_client_state(gateway_connection_t *conn) {
+    if (!conn) {
+        return;
+    }
     if (conn->state == active) {
         return;
     }
@@ -595,8 +598,8 @@ static void check_client_state(gateway_connection_t *conn) {
 static void readcb(struct bufferevent *bev, void *ctx) {
     int res;
     gateway_connection_t *conn = ctx;
+    gateway_connection_t *peer = NULL;
     gateway_log("read bytes from %s\n", conn->addr_str);
-
     if (conn->state == active) {
         if (!has_conn_type(conn)) {
             gateway_log("%s does not have a connection type\n", conn->addr_str);
@@ -649,7 +652,6 @@ static void readcb(struct bufferevent *bev, void *ctx) {
         get_session_key_str(session_key_str, conn->session_key);
         gateway_log("%s has session key %s\n", conn->addr_str, session_key_str);
 
-        gateway_connection_t *peer = NULL;
         res = process_gateway_frame(conn, &peer);
 
         if (res == WRITE_RESULT_SHUTDOWN && peer) {
@@ -658,11 +660,10 @@ static void readcb(struct bufferevent *bev, void *ctx) {
 
         if (res == READ_RESULT_ERROR || res == WRITE_RESULT_ERROR) {
             closeClientError(conn);
-        } else if (res == WRITE_RESULT_SHUTDOWN && peer) {
-            closeClientShutdown(peer);
         }
     }
     check_client_state(conn);
+    check_client_state(peer);
 }
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx) {
